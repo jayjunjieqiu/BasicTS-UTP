@@ -10,7 +10,7 @@ BASELINE_PREFIX = 'baselines/TimePFN/evaluate_config/'
 
 DATASET_LIST = ['ETTh1', 'ETTh2', 'ETTm1', 'ETTm2', 'Weather']
 MODEL_LIST = ['small.py']
-CHECKPOINT_PATH_List = ['/data/junjieqiu/BasicTS-0.5.8/checkpoints/TimePFN/BLAST_100000/16ff031a50d57da3850fd4bbc8e08a0e/TimePFN_020000.pt']
+CHECKPOINT_PATH_List = ['/path/to/your/small/checkpoint.pt']
 CONTEXT_LENGTH_LIST = [512, 720, 1024, 2048]
 PREDICTION_LENGTH_LIST = [96, 192, 336, 720]
 
