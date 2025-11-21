@@ -7,7 +7,6 @@ import numpy as np
 
 from .base_dataset import BaseDataset
 
-
 class TimeSeriesForecastingDataset(BaseDataset):
     """
     A dataset class for time series forecasting problems, handling the loading, parsing, and partitioning
