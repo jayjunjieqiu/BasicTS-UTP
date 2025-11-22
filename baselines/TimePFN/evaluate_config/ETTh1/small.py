@@ -22,13 +22,14 @@ CONTEXT_LENGTH = None
 PREDICTION_LENGTH = None
 
 MODEL_PARAM = {
-    "embed_dim": 192,
-    "pe_dim": 96,
-    "num_heads": 6,
-    "mlp_hidden_dim": 384,
-    "num_layers": 3,
+    "embed_dim": 384,
+    "pe_dim": 192,
+    "num_heads": 12,
+    "mlp_hidden_dim": 768,
+    "num_layers": 6,
     "use_rope_x": True,
     "rope_base": 10000.0,
+    "use_y_attn": True,
 }
 DATA_NAME = "ETTh1"
 

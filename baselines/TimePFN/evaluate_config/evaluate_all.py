@@ -9,8 +9,17 @@ BASICTS_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../..
 BASELINE_PREFIX = 'baselines/TimePFN/evaluate_config/'
 
 DATASET_LIST = ['ETTh1', 'ETTh2', 'ETTm1', 'ETTm2', 'Weather']
-MODEL_LIST = ['small.py']
-CHECKPOINT_PATH_List = ['/path/to/your/small/checkpoint.pt']
+MODEL_LIST = ['small.py', 'small_var1.py', 'small_var2.py']
+# CHECKPOINT_PATH_List = [
+#     '/path/to/your/timepfn_small_checkpoint.pt',
+#     '/path/to/your/timepfn_small_var1_checkpoint.pt',
+#     '/path/to/your/timepfn_small_var2_checkpoint.pt',
+# ]
+CHECKPOINT_PATH_List = [
+    '/data/junjieqiu/BasicTS-0.5.8/checkpoints/TimePFN/BLAST_10000/f05c348cd93aacad03f5d90a7e4233e5/TimePFN_best_val_loss.pt',
+    '/data/junjieqiu/BasicTS-0.5.8/checkpoints/TimePFN/BLAST_10000/09730388e0be34bcc640015cadc88edf/TimePFN_best_val_loss.pt',
+    '/data/junjieqiu/BasicTS-0.5.8/checkpoints/TimePFN/BLAST_10000/a770ae8a88b4d9e1b1b9e30e532311c6/TimePFN_best_val_loss.pt',
+]
 CONTEXT_LENGTH_LIST = [512, 720, 1024, 2048]
 PREDICTION_LENGTH_LIST = [96, 192, 336, 720]
 

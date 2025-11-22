@@ -6,7 +6,8 @@ import torch.nn.functional as F
 
 class TimePFN(nn.Module):
     def __init__(self, embed_dim: int, pe_dim: int, num_heads: int, 
-                 mlp_hidden_dim: int, num_layers: int, use_rope_x: bool, rope_base: float):
+                 mlp_hidden_dim: int, num_layers: int, use_rope_x: bool, rope_base: float,
+                 use_y_attn: bool = True):
         super().__init__()
         self.config = TimePFNModelConfig(
             embed_dim=embed_dim,
@@ -16,10 +17,30 @@ class TimePFN(nn.Module):
             num_layers=num_layers,
             use_rope_x=use_rope_x,
             rope_base=rope_base,
+            use_y_attn=use_y_attn,
         )
         self.timepfn = TimePFNModel(self.config)
+        self._init_xavier()
         self.param_count = sum(p.numel() for p in self.timepfn.parameters())
         print(f"TimePFN parameters: {self.param_count:,}")
+
+    def _init_xavier(self):
+        def init_module(m: nn.Module):
+            if isinstance(m, nn.Linear):
+                if m.weight is not None:
+                    nn.init.xavier_uniform_(m.weight)
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+            elif isinstance(m, nn.MultiheadAttention):
+                if m.in_proj_weight is not None:
+                    nn.init.xavier_uniform_(m.in_proj_weight)
+                if m.in_proj_bias is not None:
+                    nn.init.zeros_(m.in_proj_bias)
+                if m.out_proj.weight is not None:
+                    nn.init.xavier_uniform_(m.out_proj.weight)
+                if m.out_proj.bias is not None:
+                    nn.init.zeros_(m.out_proj.bias)
+        self.timepfn.apply(init_module)
 
     def forward(self, x: torch.Tensor, prediction_length: int):
         # mask the input

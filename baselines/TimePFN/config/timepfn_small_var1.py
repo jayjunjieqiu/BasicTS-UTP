@@ -24,7 +24,7 @@ MODEL_PARAM = {
     "num_heads": 12,
     "mlp_hidden_dim": 768,
     "num_layers": 6,
-    "use_rope_x": True,
+    "use_rope_x": False,
     "rope_base": 10000.0,
     "use_y_attn": True,
 }

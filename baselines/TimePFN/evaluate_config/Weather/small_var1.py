@@ -11,50 +11,35 @@ sys.path.append(os.path.abspath(__file__ + '/../../..'))
 from ...arch.model import TimePFN
 from ...runner.runner import TimePFNRunner
 
-
-############################## Hot Parameters ##############################
-# Dataset & Metrics configuration
-# Model architecture and parameters
-
 MODEL_ARCH = TimePFN
 
 CONTEXT_LENGTH = None
 PREDICTION_LENGTH = None
 
-MODEL_PARAM = {
-    "embed_dim": 384,
-    "pe_dim": 192,
-    "num_heads": 12,
-    "mlp_hidden_dim": 768,
-    "num_layers": 6,
-    "use_rope_x": True,
-    "rope_base": 10000.0,
-    "use_y_attn": True,
-}
-DATA_NAME = "ETTm1"
+DATA_NAME = "Weather"
 
-NUM_ITERATIONS = None # 总轮数
-
-############################## General Configuration ##############################
 CFG = EasyDict()
-# General settings
 CFG.DESCRIPTION = 'TimePFN Base | Debug: Data'
-CFG.GPU_NUM = 8 # Number of GPUs to use (0 for CPU mode)
-# CFG.GPU_NUM = 8 # Number of GPUs to use (0 for CPU mode)
-# Runner
+CFG.GPU_NUM = 8
 CFG.RUNNER = TimePFNRunner
 
-############################## Model Configuration ################################
 CFG.MODEL = EasyDict()
 CFG.MODEL.NAME = MODEL_ARCH.__name__
 CFG.MODEL.ARCH = MODEL_ARCH
-CFG.MODEL.PARAM = MODEL_PARAM
+CFG.MODEL.PARAM = {
+    "embed_dim": 192,
+    "pe_dim": 96,
+    "num_heads": 8,
+    "mlp_hidden_dim": 384,
+    "num_layers": 3,
+    "use_rope_x": True,
+    "rope_base": 10000.0,
+}
 CFG.MODEL.DTYPE= 'float32'
 
-############################## Training Configuration ##############################
 CFG.TRAIN = EasyDict()
 CFG.TRAIN.COMPILE_MODEL = False
-CFG.TRAIN.NUM_ITERATIONS = NUM_ITERATIONS
+CFG.TRAIN.NUM_ITERATIONS = None
 CFG.TRAIN.CKPT_SAVE_DIR = os.path.join(
     'checkpoints',
     MODEL_ARCH.__name__,
@@ -63,9 +48,7 @@ CFG.TRAIN.CKPT_SAVE_DIR = os.path.join(
 
 regular_settings = get_regular_settings(dataset_name=DATA_NAME)
 
-############################## Dataset Configuration ##############################
 CFG.DATASET = EasyDict()
-# Dataset settings
 CFG.DATASET.NAME = DATA_NAME
 CFG.DATASET.TYPE = TimeSeriesForecastingDataset
 CFG.DATASET.PARAM = EasyDict({
@@ -80,10 +63,8 @@ CFG.TEST.DATA = EasyDict()
 CFG.TEST.DATA.BATCH_SIZE = 32
 CFG.TEST.DATA.SHUFFLE = False
 
-############################## TEST Scaler Configuration ##############################
 CFG.SCALER = EasyDict()
-# Scaler settings
-CFG.SCALER.TYPE = ZScoreScaler # Scaler class
+CFG.SCALER.TYPE = ZScoreScaler
 CFG.SCALER.PARAM = EasyDict({
     'dataset_name': DATA_NAME,
     'train_ratio': regular_settings['TRAIN_VAL_TEST_RATIO'][0],
@@ -91,17 +72,12 @@ CFG.SCALER.PARAM = EasyDict({
     'rescale': regular_settings['RESCALE'],
 })
 
-############################## Metrics Configuration ##############################
-
 CFG.METRICS = EasyDict()
-# Metrics settings
 CFG.METRICS.FUNCS = EasyDict({
-                                'MAE': masked_mae,
-                                'MSE': masked_mse,
-                            })
-CFG.METRICS.NULL_VAL = regular_settings['NULL_VAL'] # Null value in the data
-
-############################## Inference Configuration ##############################
-CFG.INFERENCE = EasyDict()
-CFG.INFERENCE.GENERATION_PARAMS = EasyDict({
+    'MAE': masked_mae,
+    'MSE': masked_mse,
 })
+CFG.METRICS.NULL_VAL = regular_settings['NULL_VAL']
+
+CFG.INFERENCE = EasyDict()
+CFG.INFERENCE.GENERATION_PARAMS = EasyDict({})

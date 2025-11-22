@@ -11,7 +11,7 @@ class TwoAxisTransformerEncoderLayer(nn.Module):
     """
     def __init__(self, embed_dim: int, num_heads: int, mlp_hidden_dim: int,
                  layer_norm_eps: float = 1e-5, batch_first: bool = True,
-                 use_rope_x: bool = False, rope_base: float = 10000.0):
+                 use_rope_x: bool = False, rope_base: float = 10000.0, use_y_attn: bool = True):
         super().__init__()
         self.embed_dim = embed_dim
         self.num_heads = num_heads
@@ -20,11 +20,14 @@ class TwoAxisTransformerEncoderLayer(nn.Module):
         self.batch_first = batch_first
         self.use_rope_x = use_rope_x
         self.rope_base = rope_base
+        self.use_y_attn = use_y_attn
         self.x_attn = nn.MultiheadAttention(embed_dim, num_heads, batch_first=batch_first)
-        self.y_attn = nn.MultiheadAttention(embed_dim, num_heads, batch_first=batch_first)
+        if use_y_attn:
+            self.y_attn = nn.MultiheadAttention(embed_dim, num_heads, batch_first=batch_first)
         self.linear1 = nn.Linear(embed_dim, mlp_hidden_dim)
         self.linear2 = nn.Linear(mlp_hidden_dim, embed_dim)
-        self.norm1 = nn.LayerNorm(embed_dim, eps=layer_norm_eps)
+        if use_y_attn:
+            self.norm1 = nn.LayerNorm(embed_dim, eps=layer_norm_eps)
         self.norm2 = nn.LayerNorm(embed_dim, eps=layer_norm_eps)
         self.norm3 = nn.LayerNorm(embed_dim, eps=layer_norm_eps)
 
@@ -72,14 +75,15 @@ class TwoAxisTransformerEncoderLayer(nn.Module):
         assert ctx_qry_split_index < num_rows and ctx_qry_split_index > 0,\
             f"ctx_qry_split_index {ctx_qry_split_index} is out of range (0, {num_rows})"
 
-        # attention along cols (axis y)
-        src = src.reshape(bs * num_rows, num_cols, embed_dim)
-        src = torch.nan_to_num(src, nan=0., posinf=0., neginf=0.)
-        # disable FSDP kernel via need_weigths=False to avoid kernel error for too short sequence
-        src_attn = self.y_attn(src, src, src, need_weights=True)[0]
-        src = src_attn + src
-        src = src.reshape(bs, num_rows, num_cols, embed_dim)
-        src = self.norm1(src)
+        if self.use_y_attn:
+            # attention along cols (axis y)
+            src = src.reshape(bs * num_rows, num_cols, embed_dim)
+            src = torch.nan_to_num(src, nan=0., posinf=0., neginf=0.)
+            # disable FSDP kernel via need_weigths=False to avoid kernel error for too short sequence
+            src_attn = self.y_attn(src, src, src, need_weights=True)[0]
+            src = src_attn + src
+            src = src.reshape(bs, num_rows, num_cols, embed_dim)
+            src = self.norm1(src)
 
         # attention along rows (axis x)
         src = src.transpose(1, 2)
@@ -175,6 +179,12 @@ class TSBasicEncoder(nn.Module):
         Returns:
             (torch.Tensor) a tensor of shape (batch_size, num_rows, 2, embed_size)
         """
+        if x.dim() == 1:
+            x = x.unsqueeze(0)
+        elif x.dim() == 3 and x.size(-1) == 1:
+            x = x.squeeze(-1)
+        elif x.dim() != 2:
+            raise ValueError(f"TSBasicEncoder expects 2D input [bs, num_rows], got shape {tuple(x.shape)}")
         bs, num_rows = x.shape
         ts_embeds = self.value_proj(x.unsqueeze(-1))
 
