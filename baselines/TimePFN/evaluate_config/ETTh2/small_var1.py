@@ -27,13 +27,15 @@ CFG.MODEL = EasyDict()
 CFG.MODEL.NAME = MODEL_ARCH.__name__
 CFG.MODEL.ARCH = MODEL_ARCH
 CFG.MODEL.PARAM = {
-    "embed_dim": 192,
-    "pe_dim": 96,
-    "num_heads": 8,
-    "mlp_hidden_dim": 384,
-    "num_layers": 3,
-    "use_rope_x": True,
+    "embed_dim": 384,
+    "pe_dim": 192,
+    "num_heads": 12,
+    "mlp_hidden_dim": 768,
+    "num_layers": 6,
+    "use_rope_x": False,
     "rope_base": 10000.0,
+    "use_y_attn": True,
+    "centered_pe": True,
 }
 CFG.MODEL.DTYPE= 'float32'
 

@@ -27,6 +27,7 @@ MODEL_PARAM = {
     "use_rope_x": False,
     "rope_base": 10000.0,
     "use_y_attn": True,
+    "centered_pe": False,
 }
 DATA_NAME = "BLAST"
 

@@ -24,14 +24,14 @@ MODEL_PARAM = {
     "num_heads": 12,
     "mlp_hidden_dim": 768,
     "num_layers": 6,
-    "use_rope_x": True,
+    "use_rope_x": False,
     "rope_base": 10000.0,
-    "use_y_attn": False,
-    "centered_pe": False,
+    "use_y_attn": True,
+    "centered_pe": True,
 }
 DATA_NAME = "BLAST"
 
-NUM_ITERATIONS = 10_000 # 总轮数
+NUM_ITERATIONS = 200_000 # 总轮数
 VAL_ITERATION_INTERVAL = 5_000 # 每VAL_ITERATION_INTERVAL执行一次验证
 
 ############################## General Configuration ##############################

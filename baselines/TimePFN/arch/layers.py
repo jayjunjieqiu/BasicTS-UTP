@@ -94,51 +94,41 @@ class TwoAxisTransformerEncoderLayer(nn.Module):
         src_qry = src[:, ctx_qry_split_index:, :]
         mask_ctx = mask_x_bool[:, :ctx_qry_split_index]
         key_padding_mask_ctx = torch.logical_not(mask_ctx)
-        if not self.use_rope_x:
-            src_ctx_out = self.x_attn(
-                src_ctx, src_ctx, src_ctx, key_padding_mask=key_padding_mask_ctx, need_weights=False
-            )[0]
-            src_ctx = src_ctx_out + src_ctx
-            src_qry_out = self.x_attn(
-                src_qry, src_ctx, src_ctx, key_padding_mask=key_padding_mask_ctx, need_weights=False
-            )[0]
-            src_qry = src_qry_out + src_qry
-            src = torch.cat([src_ctx, src_qry], dim=1)
-            src = src.reshape(bs, num_cols, num_rows, embed_dim).transpose(1, 2)
-            src = self.norm2(src)
-        else:
-            head_dim = embed_dim // self.num_heads
+        head_dim = embed_dim // self.num_heads
+        if self.use_rope_x:
             assert head_dim % 2 == 0
-            B = bs * num_cols
-            H = self.num_heads
-            L_ctx = src_ctx.size(1)
-            L_qry = src_qry.size(1)
-
-            q_ctx, k_ctx, v_ctx = self._proj_qkv(src_ctx, B, H, head_dim)
+        B = bs * num_cols
+        H = self.num_heads
+        L_ctx = src_ctx.size(1)
+        L_qry = src_qry.size(1)
+        # self-attention for context rows
+        q_ctx, k_ctx, v_ctx = self._proj_qkv(src_ctx, B, H, head_dim)
+        if self.use_rope_x:
             q_ctx = self._apply_rope(q_ctx, L_ctx, 0, head_dim)
             k_ctx = self._apply_rope(k_ctx, L_ctx, 0, head_dim)
-            neg_inf = torch.tensor(-1e9, device=q_ctx.device, dtype=q_ctx.dtype)
-            attn_mask_ctx = key_padding_mask_ctx.unsqueeze(1).unsqueeze(1).expand(B, H, L_ctx, L_ctx)
-            attn_mask_ctx = torch.where(attn_mask_ctx, neg_inf, 0.0)
-            out_ctx = F.scaled_dot_product_attention(q_ctx, k_ctx, v_ctx, attn_mask=attn_mask_ctx, dropout_p=0.0, is_causal=False)
-            out_ctx = out_ctx.transpose(1, 2).reshape(B, L_ctx, embed_dim)
-            out_ctx = self.x_attn.out_proj(out_ctx)
-            src_ctx = out_ctx + src_ctx
-
-            q_qry, _, _ = self._proj_qkv(src_qry, B, H, head_dim)
-            _, k_ctx2, v_ctx2 = self._proj_qkv(src_ctx, B, H, head_dim)
+        neg_inf = torch.tensor(-1e9, device=q_ctx.device, dtype=q_ctx.dtype)
+        attn_mask_ctx = key_padding_mask_ctx.unsqueeze(1).unsqueeze(1).expand(B, H, L_ctx, L_ctx)
+        attn_mask_ctx = torch.where(attn_mask_ctx, neg_inf, 0.0)
+        out_ctx = F.scaled_dot_product_attention(q_ctx, k_ctx, v_ctx, attn_mask=attn_mask_ctx, dropout_p=0.0, is_causal=False)
+        out_ctx = out_ctx.transpose(1, 2).reshape(B, L_ctx, embed_dim)
+        out_ctx = self.x_attn.out_proj(out_ctx)
+        src_ctx = out_ctx + src_ctx
+        # cross-attention for query rows
+        q_qry, _, _ = self._proj_qkv(src_qry, B, H, head_dim)
+        _, k_ctx2, v_ctx2 = self._proj_qkv(src_ctx, B, H, head_dim)
+        if self.use_rope_x:
             q_qry = self._apply_rope(q_qry, L_qry, L_ctx, head_dim)
             k_ctx2 = self._apply_rope(k_ctx2, L_ctx, 0, head_dim)
-            attn_mask_qry = key_padding_mask_ctx.unsqueeze(1).unsqueeze(1).expand(B, H, L_qry, L_ctx)
-            attn_mask_qry = torch.where(attn_mask_qry, neg_inf, 0.0)
-            out_qry = F.scaled_dot_product_attention(q_qry, k_ctx2, v_ctx2, attn_mask=attn_mask_qry, dropout_p=0.0, is_causal=False)
-            out_qry = out_qry.transpose(1, 2).reshape(B, L_qry, embed_dim)
-            out_qry = self.x_attn.out_proj(out_qry)
-            src_qry = out_qry + src_qry
+        attn_mask_qry = key_padding_mask_ctx.unsqueeze(1).unsqueeze(1).expand(B, H, L_qry, L_ctx)
+        attn_mask_qry = torch.where(attn_mask_qry, neg_inf, 0.0)
+        out_qry = F.scaled_dot_product_attention(q_qry, k_ctx2, v_ctx2, attn_mask=attn_mask_qry, dropout_p=0.0, is_causal=False)
+        out_qry = out_qry.transpose(1, 2).reshape(B, L_qry, embed_dim)
+        out_qry = self.x_attn.out_proj(out_qry)
+        src_qry = out_qry + src_qry
 
-            src = torch.cat([src_ctx, src_qry], dim=1)
-            src = src.reshape(bs, num_cols, num_rows, embed_dim).transpose(1, 2)
-            src = self.norm2(src)
+        src = torch.cat([src_ctx, src_qry], dim=1)
+        src = src.reshape(bs, num_cols, num_rows, embed_dim).transpose(1, 2)
+        src = self.norm2(src)
 
         # MLP after attention
         mlp_out = self.linear2(F.gelu(self.linear1(src)))
@@ -148,7 +138,7 @@ class TwoAxisTransformerEncoderLayer(nn.Module):
 
 
 class TSBasicEncoder(nn.Module):
-    def __init__(self, embed_dim: int, pe_dim: int = None):
+    def __init__(self, embed_dim: int, pe_dim: int = None, centered_pe: bool = False):
         """
         This encoder will encode the input sequence into embedding vectors.
         This will also generate Sinusoidal positional embeddings as the 2nd dim along cols.
@@ -161,9 +151,12 @@ class TSBasicEncoder(nn.Module):
         self.pe_dim = pe_dim
         self.value_proj = nn.Linear(1, embed_dim)
         self.pe_proj = nn.Linear(pe_dim, embed_dim)
+        self.centered_pe = centered_pe
 
-    def _build_sinusoidal_pe(self, length: int, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
+    def _build_sinusoidal_pe(self, length: int, device: torch.device, dtype: torch.dtype, center_index: int) -> torch.Tensor:
         pos = torch.arange(length, device=device, dtype=torch.float32)
+        if self.centered_pe:
+            pos = pos - float(center_index)
         inv_freq = 1.0 / (10000 ** (torch.arange(0, self.pe_dim, 2, device=device, dtype=torch.float32) / self.pe_dim))
         angle = pos[:, None] * inv_freq[None, :]
         pe = torch.zeros(length, self.pe_dim, device=device, dtype=torch.float32)
@@ -188,7 +181,7 @@ class TSBasicEncoder(nn.Module):
         bs, num_rows = x.shape
         ts_embeds = self.value_proj(x.unsqueeze(-1))
 
-        pe = self._build_sinusoidal_pe(num_rows, device=x.device, dtype=x.dtype)
+        pe = self._build_sinusoidal_pe(num_rows, device=x.device, dtype=x.dtype, center_index=ctx_qry_split_index)
         pe = pe.unsqueeze(0).expand(bs, -1, -1)
         pe_embeds = self.pe_proj(pe)
 

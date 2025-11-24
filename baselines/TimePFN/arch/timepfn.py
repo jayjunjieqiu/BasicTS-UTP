@@ -14,15 +14,16 @@ class TimePFNModelConfig:
     num_heads: int
     mlp_hidden_dim: int
     num_layers: int
-    use_rope_x: bool = True
+    use_rope_x: bool = False
     rope_base: float = 10000.0
     use_y_attn: bool = True
+    centered_pe: bool = True
 
 class TimePFNModel(nn.Module):
     def __init__(self, config: TimePFNModelConfig):
         super().__init__()
         self.config = config
-        self.ts_encoder = TSBasicEncoder(config.embed_dim, config.pe_dim)
+        self.ts_encoder = TSBasicEncoder(config.embed_dim, config.pe_dim, centered_pe=config.centered_pe)
         self.encoder_layers = nn.ModuleList([
             TwoAxisTransformerEncoderLayer(
                 embed_dim=config.embed_dim,
