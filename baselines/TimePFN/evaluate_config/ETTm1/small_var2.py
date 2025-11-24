@@ -35,7 +35,6 @@ CFG.MODEL.PARAM = {
     "use_rope_x": True,
     "rope_base": 10000.0,
     "use_y_attn": False,
-    "centered_pe": False,
 }
 CFG.MODEL.DTYPE= 'float32'
 

@@ -138,7 +138,7 @@ class TwoAxisTransformerEncoderLayer(nn.Module):
 
 
 class TSBasicEncoder(nn.Module):
-    def __init__(self, embed_dim: int, pe_dim: int = None, centered_pe: bool = False):
+    def __init__(self, embed_dim: int, pe_dim: int = None):
         """
         This encoder will encode the input sequence into embedding vectors.
         This will also generate Sinusoidal positional embeddings as the 2nd dim along cols.
@@ -151,12 +151,9 @@ class TSBasicEncoder(nn.Module):
         self.pe_dim = pe_dim
         self.value_proj = nn.Linear(1, embed_dim)
         self.pe_proj = nn.Linear(pe_dim, embed_dim)
-        self.centered_pe = centered_pe
 
-    def _build_sinusoidal_pe(self, length: int, device: torch.device, dtype: torch.dtype, center_index: int) -> torch.Tensor:
+    def _build_sinusoidal_pe(self, length: int, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
         pos = torch.arange(length, device=device, dtype=torch.float32)
-        if self.centered_pe:
-            pos = pos - float(center_index)
         inv_freq = 1.0 / (10000 ** (torch.arange(0, self.pe_dim, 2, device=device, dtype=torch.float32) / self.pe_dim))
         angle = pos[:, None] * inv_freq[None, :]
         pe = torch.zeros(length, self.pe_dim, device=device, dtype=torch.float32)
@@ -181,7 +178,7 @@ class TSBasicEncoder(nn.Module):
         bs, num_rows = x.shape
         ts_embeds = self.value_proj(x.unsqueeze(-1))
 
-        pe = self._build_sinusoidal_pe(num_rows, device=x.device, dtype=x.dtype, center_index=ctx_qry_split_index)
+        pe = self._build_sinusoidal_pe(num_rows, device=x.device, dtype=x.dtype)
         pe = pe.unsqueeze(0).expand(bs, -1, -1)
         pe_embeds = self.pe_proj(pe)
 

@@ -7,7 +7,7 @@ import torch.nn.functional as F
 class TimePFN(nn.Module):
     def __init__(self, embed_dim: int, pe_dim: int, num_heads: int, 
                  mlp_hidden_dim: int, num_layers: int, use_rope_x: bool, rope_base: float,
-                 use_y_attn: bool, centered_pe: bool):
+                 use_y_attn: bool):
         super().__init__()
         self.config = TimePFNModelConfig(
             embed_dim=embed_dim,
@@ -18,7 +18,6 @@ class TimePFN(nn.Module):
             use_rope_x=use_rope_x,
             rope_base=rope_base,
             use_y_attn=use_y_attn,
-            centered_pe=centered_pe,
         )
         self.timepfn = TimePFNModel(self.config)
         self._init_xavier()

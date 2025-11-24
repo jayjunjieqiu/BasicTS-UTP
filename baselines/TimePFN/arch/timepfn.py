@@ -1,5 +1,4 @@
-from dataclasses import dataclass, asdict
-import os
+from dataclasses import dataclass
 import torch
 from torch import nn
 from .layers import TwoAxisTransformerEncoderLayer, PointPredictHead, TSBasicEncoder
@@ -14,16 +13,15 @@ class TimePFNModelConfig:
     num_heads: int
     mlp_hidden_dim: int
     num_layers: int
-    use_rope_x: bool = False
+    use_rope_x: bool = True
     rope_base: float = 10000.0
     use_y_attn: bool = True
-    centered_pe: bool = True
 
 class TimePFNModel(nn.Module):
     def __init__(self, config: TimePFNModelConfig):
         super().__init__()
         self.config = config
-        self.ts_encoder = TSBasicEncoder(config.embed_dim, config.pe_dim, centered_pe=config.centered_pe)
+        self.ts_encoder = TSBasicEncoder(config.embed_dim, config.pe_dim)
         self.encoder_layers = nn.ModuleList([
             TwoAxisTransformerEncoderLayer(
                 embed_dim=config.embed_dim,
@@ -113,24 +111,3 @@ class TimePFNModel(nn.Module):
 
         return predictions
 
-    @classmethod
-    def save_model(cls, model: "TimePFNModel", ckpt_path: str) -> str:
-        dirpath = os.path.dirname(ckpt_path)
-        if dirpath:
-            os.makedirs(dirpath, exist_ok=True)
-        payload = {
-            "state_dict": model.state_dict(),
-            "config": asdict(model.config),
-        }
-        torch.save(payload, ckpt_path)
-        return ckpt_path
-
-    @classmethod
-    def load_model(cls, ckpt_path: str, map_location=None, strict: bool = True) -> "TimePFNModel":
-        ckpt = torch.load(ckpt_path, map_location=map_location, weights_only=True)
-        cfg_dict = ckpt.get("config") or ckpt.get("model_config")
-        config = TimePFNModelConfig(**cfg_dict)
-        model = cls(config)
-        state_dict = ckpt.get("state_dict") or ckpt.get("model_state_dict")
-        model.load_state_dict(state_dict, strict=strict)
-        return model
