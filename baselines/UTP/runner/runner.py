@@ -2,7 +2,8 @@ from typing import Dict
 from basicts.runners.base_utsf_runner import BaseUniversalTimeSeriesForecastingRunner
 from torch import nn
 import torch
-import numpy as np
+from typing import Union, Tuple
+from torch.utils.data import DataLoader
 
 
 class UTPRunner(BaseUniversalTimeSeriesForecastingRunner):
