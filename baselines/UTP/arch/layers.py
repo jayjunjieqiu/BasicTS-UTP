@@ -2,8 +2,8 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 
-# NOTE: now only a simple 1-axis transformer encoder layer
-class TwoAxisTransformerEncoderLayer(nn.Module):
+
+class TransformerEncoderLayer(nn.Module):
     def __init__(self, embed_dim: int, num_heads: int, mlp_hidden_dim: int,
                  layer_norm_eps: float = 1e-6, batch_first: bool = True,
                  use_rope_x: bool = False, rope_base: float = 10000.0):
@@ -18,8 +18,8 @@ class TwoAxisTransformerEncoderLayer(nn.Module):
         self.x_attn = nn.MultiheadAttention(embed_dim, num_heads, batch_first=batch_first)
         self.linear1 = nn.Linear(embed_dim, mlp_hidden_dim)
         self.linear2 = nn.Linear(mlp_hidden_dim, embed_dim)
+        self.norm1 = nn.LayerNorm(embed_dim, eps=layer_norm_eps)
         self.norm2 = nn.LayerNorm(embed_dim, eps=layer_norm_eps)
-        self.norm3 = nn.LayerNorm(embed_dim, eps=layer_norm_eps)
 
     def _proj_qkv(self, x: torch.Tensor, B: int, H: int, head_dim: int):
         W = self.x_attn.in_proj_weight
@@ -88,12 +88,12 @@ class TwoAxisTransformerEncoderLayer(nn.Module):
         src = out + src
         
         src = src.reshape(bs, num_feat, T, embed_dim).transpose(1, 2)
-        src = self.norm2(src)
+        src = self.norm1(src)
 
         # MLP after attention
         mlp_out = self.linear2(F.gelu(self.linear1(src)))
         src = src + mlp_out
-        src = self.norm3(src)
+        src = self.norm2(src)
         return src
 
 
@@ -105,9 +105,21 @@ class TSBasicEncoder(nn.Module):
         self.base_context_length = base_context_length
         self.feature_proj_in = nn.Linear(3, mlp_hidden_dim)
         self.output_layer = nn.Linear(mlp_hidden_dim, embed_dim)
+        self.pre_norm = nn.LayerNorm(embed_dim)
         self.residual_layer = nn.Linear(embed_dim, embed_dim)
 
     def forward(self, x: torch.Tensor, x_mask: torch.Tensor, ctx_qry_split_index: int) -> torch.Tensor:
+        """
+        Encode scalar series with time and mask features into embeddings.
+
+        Inputs:
+            x: [B, T]
+            x_mask: [B, T] (1 valid, 0 masked)
+            ctx_qry_split_index: index separating context and query positions
+
+        Output:
+            [B, T, 1, embed_dim]
+        """
         """
         Args:
             x: (torch.Tensor) a tensor of shape (batch_size, num_rows)
@@ -128,21 +140,23 @@ class TSBasicEncoder(nn.Module):
         time_feat = time_feat.unsqueeze(0).unsqueeze(-1).expand(bs, -1, -1)
         mask = x_mask.unsqueeze(-1)
         feats = torch.cat([x.unsqueeze(-1), time_feat, mask], dim=-1)
-        y = self.feature_proj_in(feats)
-        y = F.gelu(y)
-        y = self.output_layer(y)
-        y = y + self.residual_layer(y)
+        y_embed = self.feature_proj_in(feats)
+        y_embed = F.gelu(y_embed)
+        y_embed = self.output_layer(y_embed)
+        y_out = self.residual_layer(self.pre_norm(y_embed))
+        y = y_embed + y_out
         out = y.unsqueeze(2)
         return out
 
 
 class PointPredictHead(nn.Module):
-    def __init__(self, embed_dim: int, mlp_hidden_dim: int):
+    def __init__(self, embed_dim: int, mlp_hidden_dim: int, num_quantiles: int):
         super().__init__()
         self.embed_dim = embed_dim
         self.mlp_hidden_dim = mlp_hidden_dim
+        self.num_quantiles = num_quantiles
         self.linear1 = nn.Linear(embed_dim, mlp_hidden_dim)
-        self.linear2 = nn.Linear(mlp_hidden_dim, 1)
+        self.linear2 = nn.Linear(mlp_hidden_dim, num_quantiles)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -155,5 +169,5 @@ class PointPredictHead(nn.Module):
         x = torch.nan_to_num(x, nan=0., posinf=0., neginf=0.)
         hidden = F.gelu(self.linear1(x)) # add gradient stability to decoder
         hidden = torch.nan_to_num(hidden, nan=0., posinf=0., neginf=0.)
-        out = self.linear2(hidden).squeeze(-1)
+        out = self.linear2(hidden)
         return out

@@ -9,10 +9,9 @@ BASICTS_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../..
 BASELINE_PREFIX = 'baselines/UTP/evaluate_config/'
 
 DATASET_LIST = ['ETTh1', 'ETTh2', 'ETTm1', 'ETTm2', 'Weather']
-MODEL_LIST = ['utp_base.py', 'utp_large.py']
+MODEL_LIST = ['utp_base.py']
 CHECKPOINT_PATH_List = [
     '/data/junjieqiu/BasicTS-0.5.8/checkpoints/UTP/BLAST_200000/faeacf6e79ed12b50e1b9beb3bdf7195/UTP_best_val_loss.pt',
-    '/data/junjieqiu/BasicTS-0.5.8/ccheckpoints/UTP/BLAST_200000/5c43ef4776fe8ba5b84bdeb5401ce179/UTP_best_val_loss.pt',
 ]
 CONTEXT_LENGTH_LIST = [512, 720, 1024, 2048]
 PREDICTION_LENGTH_LIST = [96, 192, 336, 720]

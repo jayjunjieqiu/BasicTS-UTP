@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 import torch
 from torch import nn
-from .layers import TwoAxisTransformerEncoderLayer, PointPredictHead, TSBasicEncoder
+from .layers import TransformerEncoderLayer, PointPredictHead, TSBasicEncoder
 import torch.nn.functional as F
 
 
@@ -17,6 +17,7 @@ class UTPModelConfig:
     use_reg_token: bool = False
     max_context_length: int = 1024
     max_query_length: int = 64
+    quantiles: list = None
 
 class UTPModel(nn.Module):
     def __init__(self, config: UTPModelConfig):
@@ -25,7 +26,7 @@ class UTPModel(nn.Module):
         self.ts_encoder = TSBasicEncoder(config.embed_dim, config.mlp_hidden_dim, config.base_context_length)
         self.reg_token = nn.Parameter(torch.zeros(1, 1, 1, config.embed_dim))
         self.encoder_layers = nn.ModuleList([
-            TwoAxisTransformerEncoderLayer(
+            TransformerEncoderLayer(
                 embed_dim=config.embed_dim,
                 num_heads=config.num_heads,
                 mlp_hidden_dim=config.mlp_hidden_dim,
@@ -35,7 +36,8 @@ class UTPModel(nn.Module):
                 rope_base=config.rope_base,
             ) for _ in range(config.num_layers)
         ])
-        self.predict_head = PointPredictHead(config.embed_dim, config.mlp_hidden_dim)
+        num_quantiles = len(self.config.quantiles) if self.config.quantiles is not None else 1
+        self.predict_head = PointPredictHead(config.embed_dim, config.mlp_hidden_dim, num_quantiles)
 
     def encode(self, x: torch.Tensor, x_mask: torch.Tensor, context_query_split_index: int):
         """
@@ -129,15 +131,14 @@ class UTPModel(nn.Module):
             x_pad = F.pad(x_in, (0, chunk), mode='constant', value=0.0)
             mask_pad = F.pad(x_mask_in, (0, chunk), mode='constant', value=0.0)
 
-            # forward and slice normalized predictions
             pred_norm = self.forward(x_pad, mask_pad, split)
-            pred_norm = pred_norm[:, split:split + chunk]
+            pred_norm = pred_norm[:, split:split + chunk, :]
 
             preds_norm_chunks.append(pred_norm)
 
-            # append predictions to become part of context for next roll
-            x_norm = torch.cat([x_norm, pred_norm], dim=1)
-            app_mask = torch.ones_like(pred_norm)
+            idx = self.config.quantiles.index(0.5) if (self.config.quantiles is not None and 0.5 in self.config.quantiles) else 0
+            x_norm = torch.cat([x_norm, pred_norm[:, :, idx]], dim=1)
+            app_mask = torch.ones_like(pred_norm[:, :, idx])
             x_norm_mask = torch.cat([x_norm_mask, app_mask], dim=1)
 
             remaining -= chunk
@@ -147,6 +148,49 @@ class UTPModel(nn.Module):
         if preds_norm.shape[1] > prediction_length:
             preds_norm = preds_norm[:, :prediction_length]
 
-        # denormalize using the initial mean/std
-        predictions = torch.sinh(preds_norm) * std[:, 0:1] + mean[:, 0:1]
+        predictions = torch.sinh(preds_norm) * std[:, 0:1, None] + mean[:, 0:1, None]
+        return predictions
+
+    def predict_quantiles(self, context: torch.Tensor, prediction_length: int):
+        mask = torch.logical_not(torch.isnan(context))
+        count = mask.sum(dim=1, keepdim=True).clamp(min=1)
+        sum_vals = torch.where(mask, context, torch.zeros_like(context)).sum(dim=1, keepdim=True)
+        mean = sum_vals / count
+        diff = torch.where(mask, context - mean, torch.zeros_like(context))
+        var = (diff * diff).sum(dim=1, keepdim=True) / count
+        std = torch.sqrt(var)
+        std = torch.where(std == 0, torch.ones_like(std), std)
+        x_norm = torch.asinh((context - mean) / std)
+
+        x_norm_mask = torch.logical_not(torch.isnan(x_norm)).float()
+        x_norm = torch.nan_to_num(x_norm, nan=0., posinf=0., neginf=0.)
+
+        preds_norm_chunks = []
+        remaining = prediction_length
+        max_ctx = self.config.max_context_length
+        max_qry = self.config.max_query_length
+
+        while remaining > 0:
+            chunk = remaining if remaining <= max_qry else max_qry
+            if x_norm.shape[1] > max_ctx:
+                x_in = x_norm[:, -max_ctx:]
+                x_mask_in = x_norm_mask[:, -max_ctx:]
+            else:
+                x_in = x_norm
+                x_mask_in = x_norm_mask
+            split = x_in.shape[1]
+            x_pad = F.pad(x_in, (0, chunk), mode='constant', value=0.0)
+            mask_pad = F.pad(x_mask_in, (0, chunk), mode='constant', value=0.0)
+            pred_norm = self.forward(x_pad, mask_pad, split)
+            pred_norm = pred_norm[:, split:split + chunk, :]
+            preds_norm_chunks.append(pred_norm)
+            x_norm = torch.cat([x_norm, pred_norm[:, :, self.config.quantiles.index(0.5)]], dim=1)
+            app_mask = torch.ones_like(pred_norm[:, :, self.config.quantiles.index(0.5)])
+            x_norm_mask = torch.cat([x_norm_mask, app_mask], dim=1)
+            remaining -= chunk
+
+        preds_norm = torch.cat(preds_norm_chunks, dim=1)
+        if preds_norm.shape[1] > prediction_length:
+            preds_norm = preds_norm[:, :prediction_length]
+        predictions = torch.sinh(preds_norm) * std[:, 0:1, None] + mean[:, 0:1, None]
         return predictions
