@@ -94,7 +94,10 @@ class TimeSeriesForecastingDataset(BaseDataset):
         total_len = len(data)
         valid_len = int(total_len * self.train_val_test_ratio[1])
         test_len = int(total_len * self.train_val_test_ratio[2])
-        train_len = total_len - valid_len - test_len
+        if sum(self.train_val_test_ratio) < 1.0 - 1e-5:
+            train_len = int(total_len * self.train_val_test_ratio[0])
+        else:
+            train_len = total_len - valid_len - test_len
 
         # Automatically configure the overlap parameter
         minimal_len = self.input_len + self.output_len
@@ -111,14 +114,29 @@ class TimeSeriesForecastingDataset(BaseDataset):
 
         if self.mode == 'train':
             offset = self.output_len if self.overlap else 0
-            seg = data[:train_len + offset]
+            if sum(self.train_val_test_ratio) < 1.0 - 1e-5:
+                # If sum < 1, we have a "rest" part at the beginning
+                rest_len = total_len - train_len - valid_len - test_len
+                seg = data[rest_len:rest_len + train_len + offset]
+            else:
+                seg = data[:train_len + offset]
         elif self.mode == 'valid':
             offset_left = self.input_len - 1 if self.overlap else 0
             offset_right = self.output_len if self.overlap else 0
-            seg = data[train_len - offset_left : train_len + valid_len + offset_right]
+            if sum(self.train_val_test_ratio) < 1.0 - 1e-5:
+                # If sum < 1, valid set follows train set, which follows rest
+                rest_len = total_len - train_len - valid_len - test_len
+                start_idx = rest_len + train_len
+                seg = data[start_idx - offset_left : start_idx + valid_len + offset_right]
+            else:
+                seg = data[train_len - offset_left : train_len + valid_len + offset_right]
         else:  # self.mode == 'test'
             offset = self.input_len - 1 if self.overlap else 0
-            seg = data[train_len + valid_len - offset:]
+            if sum(self.train_val_test_ratio) < 1.0 - 1e-5:
+                 # If sum < 1, test set is at the end
+                 seg = data[-test_len - offset:] # or use explicit indices
+            else:
+                 seg = data[train_len + valid_len - offset:]
 
         if not self.memmap:
             seg = seg.copy()
