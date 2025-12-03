@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict
 import torch
 from torch import nn
 from .layers import TransformerEncoderLayer, PointPredictHead, TSBasicEncoder
@@ -194,3 +194,19 @@ class UTPModel(nn.Module):
             preds_norm = preds_norm[:, :prediction_length]
         predictions = torch.sinh(preds_norm) * std[:, 0:1, None] + mean[:, 0:1, None]
         return predictions
+
+    @classmethod
+    def load_model(cls, path: str, map_location: str = 'cpu'):
+        state_dict = torch.load(path, map_location=map_location, weights_only=True)
+        config = UTPModelConfig(**state_dict['config'])
+        model = UTPModel(config).to(map_location)
+        model.load_state_dict(state_dict['model'], strict=True)
+        return model
+
+    @classmethod
+    def save_model(cls, model: 'UTPModel', path: str):
+        state_dict = {
+            'config': asdict(model.config),
+            'model': model.state_dict(),
+        }
+        torch.save(state_dict, path)

@@ -96,7 +96,7 @@ class UTP(nn.Module):
             loss = 2.0 * torch.abs((target - preds_q) * ((target <= preds_q).float() - q))
             loss = loss * mask.float()
             loss = loss.mean(dim=-2)
-            loss = loss.sum(dim=-1)
+            loss = loss.mean(dim=-1)
             loss[loss > 500] = 0
             loss = loss.mean()
             return loss

@@ -22,7 +22,7 @@ MODEL_PARAM = {
     "embed_dim": 384,
     "num_heads": 12,
     "mlp_hidden_dim": 1536,
-    "num_layers": 12,
+    "num_layers": 6,
     "use_rope_x": True,
     "rope_base": 10000.0,
     "base_context_length": 1024,
