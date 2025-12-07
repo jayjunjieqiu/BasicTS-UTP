@@ -21,32 +21,90 @@ class UTPRunner(BaseUniversalTimeSeriesForecastingRunner):
         self.register_iteration_meter('val/huberloss', 'val', '{:.4f}')
 
     def forward(self, data: Dict, **kwargs) -> Dict:
-        inputs, labels = data['inputs'], data['labels']
-        inputs = self.to_running_device(inputs)
-        labels = self.to_running_device(labels)
-        label_mask = torch.logical_not(torch.isnan(labels)).float()
+        x = self.to_running_device(data['x'])
+        x_mask = self.to_running_device(data['x_mask'])
+        block_split_mask = self.to_running_device(data['block_split_mask'])
+        input_output_split_mask = self.to_running_device(data['input_output_split_mask'])
+        query_mask = self.to_running_device(data['query_mask'])
+        labels = self.to_running_device(data['labels'])
+        labels_mask = self.to_running_device(data['labels_mask'])
+        
+        # Model forward: (B, N, L, num_quantiles)
+        # Note: UTP.forward wraps UTPModel.forward
+        # UTPModel.forward(x, x_mask, block_split_mask, input_output_split_mask)
+        
+        # Ensure input shape is (B, N, L) as expected by model
+        # Dataset returns (B, L) if batch_size > 1, but we need N dimension.
+        # Actually dataset returns dictionary of tensors. DataLoader stacks them.
+        # x shape from dataloader: (B, L)
+        # Model expects (B, N, L). Here N=1 since we pack everything into L.
+        
+        if x.dim() == 2:
+            x = x.unsqueeze(1)
+            x_mask = x_mask.unsqueeze(1)
+            block_split_mask = block_split_mask.unsqueeze(1)
+            input_output_split_mask = input_output_split_mask.unsqueeze(1)
+            query_mask = query_mask.unsqueeze(1)
+            
+        # Forward pass
+        # UTP.forward signature: (x, x_mask, block_split_mask, input_output_split_mask)
+        preds = self.model(x, x_mask, block_split_mask, input_output_split_mask)
+        # preds shape: (B, N, L, num_quantiles)
 
-        loss = self.model(inputs, labels=labels, label_mask=label_mask)
+        # Build aligned selections per batch to avoid mismatched lengths
+        B = preds.shape[0]
+        Q = preds.shape[-1]
+        selected_preds_list = []
+        selected_labels_list = []
+        selected_mask_list = []
 
-        prediction_length = labels.shape[1] if labels.dim() == 2 else int(labels.shape[0])
-        preds = self.model(inputs, prediction_length=prediction_length)
-        if preds.dim() == 3:
-            model_ref = getattr(self.model, 'module', self.model)
-            quantiles = getattr(getattr(model_ref, 'config', None), 'quantiles', None)
-            if quantiles is not None and 0.5 in quantiles:
-                idx = quantiles.index(0.5)
-            else:
-                idx = (preds.shape[-1] // 2)
-            preds = preds[:, :, idx]
-        preds = preds.to(labels.dtype)
+        for b in range(B):
+            preds_b = preds[b]  # (N, L, Q)
+            qmask_b = query_mask[b]  # (N, L)
+            labels_b = labels[b]  # (M_padded,)
+            lmask_b = labels_mask[b]  # (M_padded,)
 
-        labels_filled = torch.nan_to_num(labels, nan=0.0)
-        huber = nn.HuberLoss(reduction="none", delta=2.0)(preds, labels_filled)
-        huber = huber * label_mask
-        valid_count = label_mask.sum()
-        huber = huber.sum() / torch.clamp(valid_count, min=1.0)
+            preds_b_flat = preds_b.reshape(-1, Q)
+            qmask_b_flat = qmask_b.reshape(-1)
+            num_queries_b = int(qmask_b_flat.sum().item())
 
-        return {'loss': loss, 'huberloss': huber}
+            sel_preds_b = preds_b_flat[qmask_b_flat.bool()]  # (num_queries_b, Q)
+            sel_labels_b = labels_b[:num_queries_b]  # (num_queries_b,)
+            sel_mask_b = lmask_b[:num_queries_b]  # (num_queries_b,)
+
+            selected_preds_list.append(sel_preds_b)
+            selected_labels_list.append(sel_labels_b)
+            selected_mask_list.append(sel_mask_b)
+
+        selected_preds = torch.cat(selected_preds_list, dim=0).unsqueeze(1).unsqueeze(1)
+        selected_labels = torch.cat(selected_labels_list, dim=0).unsqueeze(1).unsqueeze(1)
+        selected_mask = torch.cat(selected_mask_list, dim=0).unsqueeze(1).unsqueeze(1)
+        dtype = selected_preds.dtype
+        selected_labels = selected_labels.to(dtype)
+        selected_mask = selected_mask.to(dtype)
+        
+        # Get quantiles from model config
+        if hasattr(self.model, 'module'):
+            config = self.model.module.utp_config
+        else:
+            config = self.model.utp_config
+        quantiles = config.quantiles
+        
+        from baselines.UTP.arch.utp import UTPModel
+        loss = UTPModel.compute_loss(selected_preds, selected_labels, selected_mask, quantiles)
+        
+        # Huber loss for metrics (on median) with mask weighting
+        if 0.5 in quantiles:
+            idx = quantiles.index(0.5)
+            median_pred = selected_preds[..., idx]
+        else:
+            median_pred = selected_preds[..., selected_preds.shape[-1] // 2]
+
+        huber = nn.HuberLoss(reduction="none", delta=2.0)(median_pred, selected_labels)
+        huber = huber * selected_mask
+        huber_loss = huber.sum() / selected_mask.sum().clamp(min=1.0)
+        
+        return {'loss': loss, 'huberloss': huber_loss}
 
     def train_iters(self, iteration: int, dataloader: DataLoader) -> torch.Tensor:
         """It must be implement to define training detail.

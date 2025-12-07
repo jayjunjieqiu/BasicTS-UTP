@@ -5,10 +5,10 @@ from easydict import EasyDict
 from basicts.data.simple_tsf_dataset import TimeSeriesForecastingDataset
 from basicts.scaler import ZScoreScaler
 from basicts.utils.serialization import get_regular_settings
-from basicts.metrics import masked_mae, masked_mse
+from basicts.metrics import masked_mae, masked_rmse
 sys.path.append(os.path.abspath(__file__ + '/../../..'))
 
-from ...arch.model import UTP
+from ...arch.model import UTP, UTPModelConfig
 from ...runner.runner import UTPRunner
 
 
@@ -21,25 +21,28 @@ MODEL_ARCH = UTP
 CONTEXT_LENGTH = None
 PREDICTION_LENGTH = None
 
+UTP_CONFIG = UTPModelConfig(
+    quantiles=[0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9],
+    hidden_size=384,
+    intermediate_size=1536,
+    num_layers=6,
+    rope_percentage=0.75,
+    num_attention_heads=12,
+    rope_theta=10000.0,
+    attention_dropout=0.0,
+)
+
 MODEL_PARAM = {
-    "embed_dim": 768,
-    "num_heads": 12,
-    "mlp_hidden_dim": 3072,
-    "num_layers": 12,
-    "use_rope_x": True,
-    "rope_base": 10000.0,
-    "base_context_length": 1024,
-    "use_reg_token": True,
-    "asinh_transform": True,
+    "config": UTP_CONFIG
 }
-DATA_NAME = "Weather"
+DATA_NAME = "PEMS08"
 
 NUM_ITERATIONS = None # 总轮数
 
 ############################## General Configuration ##############################
 CFG = EasyDict()
 # General settings
-CFG.DESCRIPTION = 'UTP Tiny | Debug: Data'
+CFG.DESCRIPTION = 'UTP Tiny | Debug: Data | 1'
 CFG.GPU_NUM = 8 # Number of GPUs to use (0 for CPU mode)
 # CFG.GPU_NUM = 8 # Number of GPUs to use (0 for CPU mode)
 # Runner
@@ -63,6 +66,7 @@ CFG.TRAIN.CKPT_SAVE_DIR = os.path.join(
 )
 
 regular_settings = get_regular_settings(dataset_name=DATA_NAME)
+regular_settings['TRAIN_VAL_TEST_RATIO'] = [0.6, 0.2, 0.2]
 
 ############################## Dataset Configuration ##############################
 CFG.DATASET = EasyDict()
@@ -74,7 +78,7 @@ CFG.DATASET.PARAM = EasyDict({
     'train_val_test_ratio': regular_settings['TRAIN_VAL_TEST_RATIO'],
     'input_len': CONTEXT_LENGTH,
     'output_len': PREDICTION_LENGTH,
-    'overlap': True
+    'overlap': False
 })
 CFG.TEST = EasyDict()
 CFG.TEST.DATA = EasyDict()
@@ -98,7 +102,7 @@ CFG.METRICS = EasyDict()
 # Metrics settings
 CFG.METRICS.FUNCS = EasyDict({
                                 'MAE': masked_mae,
-                                'MSE': masked_mse,
+                                'RMSE': masked_rmse,
                             })
 CFG.METRICS.NULL_VAL = regular_settings['NULL_VAL'] # Null value in the data
 

@@ -3,8 +3,8 @@ import sys
 from easydict import EasyDict
 sys.path.append(os.path.abspath(__file__ + '/../../..'))
 
-from ..arch import UTP
-from ..data import BLASTDatasetMixUp
+from ..arch import UTP, UTPModelConfig
+from ..data import BLASTDataset
 from ..runner import UTPRunner
 from ..loss import fake_loss
 
@@ -15,20 +15,22 @@ from ..loss import fake_loss
 
 MODEL_ARCH = UTP
 
-context_length = 1024
-predict_length = 64 # ref: chronos-bolt-base/config.json
+# context_length = 1024 # Removed
+# predict_length = 64 # Removed
+
+UTP_CONFIG = UTPModelConfig(
+    quantiles=[0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9],
+    hidden_size=192,
+    intermediate_size=768,
+    num_layers=4,
+    rope_percentage=0.75,
+    num_attention_heads=6,
+    rope_theta=10000.0,
+    attention_dropout=0.0,
+)
 
 MODEL_PARAM = {
-    "embed_dim": 384,
-    "num_heads": 12,
-    "mlp_hidden_dim": 1536,
-    "num_layers": 6,
-    "use_rope_x": True,
-    "rope_base": 10000.0,
-    "base_context_length": 1024,
-    "use_reg_token": True,
-    "asinh_transform": True,
-    "quantiles": [0.01, 0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.35, 0.4, 0.45, 0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85, 0.9, 0.95, 0.99],
+    "config": UTP_CONFIG
 }
 DATA_NAME = "BLAST"
 
@@ -111,10 +113,13 @@ CFG.EVAL.USE_GPU = True # Whether to use GPU for evaluation. Default: True
 CFG.DATASET = EasyDict()
 # Dataset settings
 CFG.DATASET.NAME = DATA_NAME
-CFG.DATASET.TYPE = BLASTDatasetMixUp
+CFG.DATASET.TYPE = BLASTDataset
 CFG.DATASET.PARAM = EasyDict({
-    'context_length': context_length,
-    'target_length': predict_length,
+    'pack_length': 2048,
+    'li_min': 48,
+    'li_max': 1024,
+    'alpha_min': 0.1,
+    'alpha_max': 1.2,
     'num_valid_samples': 10000
 })
 
