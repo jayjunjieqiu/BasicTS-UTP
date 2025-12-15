@@ -119,7 +119,7 @@ CFG.DATASET.TYPE = BLASTDataset
 CFG.DATASET.PARAM = EasyDict({
     'context_length': context_length,
     'target_length': predict_length,
-    'num_valid_samples': 10
+    'num_valid_samples': 10000
 })
 
 ############################## Inference Configuration ##############################
