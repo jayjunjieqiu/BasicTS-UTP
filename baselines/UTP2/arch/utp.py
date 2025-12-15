@@ -1,0 +1,580 @@
+import torch
+from torch import nn
+import torch.nn.functional as F
+from typing import Optional
+from dataclasses import dataclass, asdict
+
+@dataclass
+class UTP2Config:
+    quantiles: list
+    patch_size: int
+    rope_percentage: float # https://arxiv.org/pdf/2410.06205
+    max_input_patches: int
+    max_output_patches: int
+    hidden_size: int
+    intermediate_size: int
+    num_layers: int
+    num_attention_heads: int
+    use_arcsinh: bool = True
+    rope_theta: float = 10000.0
+    attention_dropout: float = 0.0
+
+class UTP2(nn.Module):
+    def __init__(self, config: UTP2Config):
+        super().__init__()
+        self.config = config
+        self.reg_token = nn.Parameter(torch.randn(1, 1, config.hidden_size))
+        self.rotary_emb = RotaryEmbedding(config)
+        self.ts_encoder = TSEncoder(config)
+        self.encoder_layers = nn.ModuleList([
+            TransformerDecoderLayer(config) for _ in range(config.num_layers)
+        ])
+        self.predict_head = QuantilePredictHead(config)
+        self.instance_norm = InstanceNorm(config.use_arcsinh)
+        self.patch = Patch(config.patch_size, config.patch_size)
+
+    def forward(self, context: torch.Tensor, context_mask: torch.Tensor, num_output_patches: int) -> torch.Tensor:
+        """
+        Args:
+            context: torch.Tensor, (batch_size, context_length)
+            context_mask: torch.Tensor, (batch_size, context_length), 1 for observed patches
+            num_output_patches: int, the number of output patches
+        Returns:
+            outputs: torch.Tensor, shape (batch_size, future_length, num_quantiles)
+        """
+        bs, _ = context.shape
+        # 1. Patch the context and future, and concatenate them
+        patched_context, attention_mask, loc_scale = self._prepare_patched_context(context, context_mask)
+        patched_future = self._prepare_patched_future(patched_context.shape[0], num_output_patches)
+        patched_context_future = torch.cat([patched_context, patched_future], dim=1)
+
+        # 2. Encode the patched context and future and add [REG] token
+        h = self.ts_encoder(patched_context_future)
+        num_input_patches = patched_context.shape[1]
+        h = torch.cat([h[:, :num_input_patches], self.reg_token.expand(bs, -1, -1), h[:, num_input_patches:]], dim=1)
+
+        # 3. Generate rotary embeddings
+        position_ids = torch.arange(0, h.shape[1], dtype=torch.long, device=h.device)
+        position_ids = position_ids.unsqueeze(0).expand(bs, -1) # (B, P+1)
+        cos, sin = self.rotary_emb(h, position_ids)
+
+        # 4. Build attention mask
+        attention_mask = torch.cat([
+            attention_mask, 
+            torch.ones(bs, 1, dtype=torch.bool, device=attention_mask.device),
+            torch.ones(bs, num_output_patches, dtype=torch.bool, device=attention_mask.device)
+        ], dim=1)
+        attention_mask = attention_mask.unsqueeze(1) & attention_mask.unsqueeze(2)  # (B, L, L)
+        attention_mask = attention_mask.unsqueeze(1) # (B, 1, L, L)
+
+        # 5. Apply transformer layers
+        for layer in self.encoder_layers:
+            h = layer(h, (cos, sin), attention_mask)
+
+        # 6. Predict quantiles for the output patches
+        outputs = self.predict_head(h[:, -num_output_patches:]) # (bs, num_output_patches, patch_size * num_quantiles)
+        # Reshape to (bs, num_output_patches * patch_size, num_quantiles)
+        outputs = outputs.reshape(bs, num_output_patches * self.config.patch_size, -1)
+
+        # 7. Inverse instance norm
+        loc, scale = loc_scale
+        loc_scale = (loc.unsqueeze(-1), scale.unsqueeze(-1)) # (bs, 1, 1) expand to quantile prediction shape
+        outputs = self.instance_norm.inverse(outputs, loc_scale)
+        return outputs
+
+    def predict(self, context: Optional[torch.Tensor|list[torch.Tensor]], prediction_length: int = 0) -> torch.Tensor:
+        """
+        Args:
+            context: torch.Tensor, shape (batch_size, input_length) or list of 1D torch.Tensor
+            prediction_length: int, the length of output
+        Returns:
+            predictions: torch.Tensor, shape (batch_size, prediction_length, num_quantiles)
+        
+        # If context series have different lengths, left-pad each one with NaNs to the maximum length among them.
+        """
+        # 1. Convert list of tensors to a single tensor if necessary
+        if isinstance(context, list):
+            # 1. Pad each tensor in the list to the maximum length
+            max_len = max(tensor.shape[0] for tensor in context)
+            padded_tensors = []
+            for tensor in context:
+                padding = torch.full((max_len - tensor.shape[0],), float('nan'), device=tensor.device)
+                padded_tensor = torch.cat([padding, tensor], dim=0)
+                padded_tensors.append(padded_tensor)
+            context = torch.stack(padded_tensors, dim=0)
+
+        context_mask = (~torch.isnan(context)).float()
+
+        # 2. Use rolling window to generate predictions
+        patch_size = self.config.patch_size
+        num_output_patches = (prediction_length + patch_size - 1) // patch_size
+        
+        if num_output_patches <= self.config.max_output_patches:
+            predictions = self(context, context_mask, num_output_patches)
+            return predictions[:, :prediction_length]
+        else:
+            # If the required number of output patches exceeds the max limit,
+            # use a rolling window approach.
+            predictions = []
+            current_context = context
+            current_context_mask = context_mask
+            
+            remaining_patches = num_output_patches
+            while remaining_patches > 0:
+                step_patches = min(remaining_patches, self.config.max_output_patches)
+                step_preds = self(current_context, current_context_mask, step_patches) # (B, step_len, Q)
+                predictions.append(step_preds)
+                
+                # Update context for next step
+                quantiles = self.config.quantiles
+                try:
+                    median_idx = quantiles.index(0.5)
+                except ValueError:
+                    # Fallback to middle index
+                    median_idx = len(quantiles) // 2
+                step_values = step_preds[..., median_idx] # (B, step_len)
+                current_context = torch.cat([current_context, step_values], dim=1)
+                # Mark appended predictions as observed (or unobserved? usually observed for AR)
+                # But since they are predictions, maybe we should treat them as observed context for next step.
+                # Let's mark them as observed (1.0).
+                step_mask = torch.ones_like(step_values)
+                current_context_mask = torch.cat([current_context_mask, step_mask], dim=1)
+                
+                remaining_patches -= step_patches
+            
+            predictions = torch.cat(predictions, dim=1)
+            return predictions[:, :prediction_length]
+        
+
+    def _prepare_patched_context(self, context: torch.Tensor, context_mask: torch.Tensor):
+        """
+        Args:
+            context: torch.Tensor, shape (batch_size, input_length)
+            context_mask: torch.Tensor, shape (batch_size, input_length), 1 for observed patches
+        Returns:
+            patched_context: (batch_size, num_context_patches, patch_size * 2)
+            attention_mask: (batch_size, num_context_patches), 1 for observed patches
+            loc_scale: tuple of (batch_size, 1)
+        """
+        # 1. Truncate context if it's longer than model's context length
+        _, li = context.shape
+        if li > (self.config.max_input_patches * self.config.patch_size):
+            context = context[:, -self.config.max_input_patches * self.config.patch_size:]
+            context_mask = context_mask[:, -self.config.max_input_patches * self.config.patch_size:]
+
+        # 2. Scaling
+        context, loc_scale = self.instance_norm(context)
+
+        # 3. Patching
+        # patched_context: (batch_size, num_patches, patch_size)
+        # patched_mask: (batch_size, num_patches, patch_size)
+        patched_context = self.patch(context) # (batch_size, num_patches, patch_size)
+        patched_mask = torch.nan_to_num(self.patch(context_mask), nan=0.0)
+        patched_context = torch.where(patched_mask > 0.0, patched_context, 0.0)
+        
+        # 4. attention_mask = 1 if at least one item in the patch is observed
+        attention_mask = patched_mask.sum(dim=-1) > 0 # (batch_size, num_patches)
+
+        # 5. Concatenate context and mask along the last dimension
+        patched_context = torch.cat([patched_context, patched_mask], dim=-1) # (batch_size, num_patches, patch_size * 2)
+        return patched_context, attention_mask, loc_scale
+            
+    def _prepare_patched_future(self, batch_size: int, num_output_patches: int):
+        """
+        Args:
+            batch_size: int, the batch size
+            num_output_patches: int, the number of output patches
+        Returns:
+            patched_future: torch.Tensor, shape (batch_size, num_output_patches, patch_size * 2)
+        """
+        assert num_output_patches <= self.config.max_output_patches, f"num_output_patches ({num_output_patches}) must be less than or equal to max_output_patches ({self.config.max_output_patches})"
+        patched_future = torch.zeros(batch_size, num_output_patches, self.config.patch_size * 2, device=self.reg_token.device, dtype=torch.float32)
+        return patched_future
+
+
+    @classmethod
+    def load_model(cls, path: str, map_location: str = 'cpu'):
+        state_dict = torch.load(path, map_location=map_location, weights_only=True)
+        config = UTP2Config(**state_dict['config'])
+        model = UTP2(config).to(map_location)
+        model.load_state_dict(state_dict['model'], strict=True)
+        return model
+
+    @classmethod
+    def save_model(cls, model: 'UTP2', path: str):
+        state_dict = {
+            'config': asdict(model.config),
+            'model': model.state_dict(),
+        }
+        torch.save(state_dict, path)
+
+    @classmethod
+    def compute_loss(
+        cls, predictions: torch.Tensor, targets: torch.Tensor, 
+        targets_mask: torch.Tensor, quantiles: list[float]
+        ):
+        """
+        Inputs:
+            predictions: torch.Tensor, shape (B, ..., num_quantiles)
+            targets: torch.Tensor, shape (B, ...)
+            targets_mask: torch.Tensor, shape (B, ...)
+            quantiles: list of float, the quantiles to compute loss
+        Output:
+            loss: torch.Tensor, scalar
+
+        Compute the pinball loss
+        """
+        q = torch.tensor(quantiles, device=predictions.device, dtype=predictions.dtype)
+        # Reshape q to match predictions rank: (1, ..., 1, num_quantiles)
+        view_shape = [1] * (predictions.ndim - 1) + [-1]
+        q = q.view(*view_shape)
+        
+        targets = targets.unsqueeze(-1) # (B, ..., 1)
+        targets_mask = targets_mask.unsqueeze(-1) # (B, ..., 1)
+        
+        errors = targets - predictions
+        loss = torch.max((q - 1) * errors, q * errors) * targets_mask # (B, ..., num_quantiles)
+        
+        return loss.sum() / (targets_mask.sum().clamp(min=1.0) * len(quantiles))
+        
+
+# Modified transformers.models.llama.modeling_llama.LlamaRotaryEmbedding
+class RotaryEmbedding(nn.Module):
+    inv_freq: torch.Tensor  # fix linting for `register_buffer`
+    def __init__(self, config: UTP2Config, device=None):
+        super().__init__()
+        self.config = config
+
+        rope_init_fn: Callable = self.compute_default_rope_parameters
+        inv_freq, self.attention_scaling = rope_init_fn(self.config, device)
+
+        self.register_buffer("inv_freq", inv_freq, persistent=False)
+        self.original_inv_freq = inv_freq
+
+    @staticmethod
+    def compute_default_rope_parameters(
+        config: Optional[UTP2Config] = None,
+        device: Optional["torch.device"] = None,
+    ) -> tuple["torch.Tensor", float]:
+        base = config.rope_theta
+        dim = config.hidden_size // config.num_attention_heads
+
+        attention_factor = 1.0  # Unused in this type of RoPE
+
+        # Compute the inverse frequencies
+        inv_freq = 1.0 / (
+            base ** (torch.arange(0, dim, 2, dtype=torch.float, device=device) / dim)
+        )
+        return inv_freq, attention_factor
+
+    @torch.no_grad()
+    def forward(self, x, position_ids):
+        """
+        Args:
+            x: torch.Tensor, (batch_size, seq_len, hidden_size)
+            position_ids: torch.Tensor, (batch_size, seq_len)
+        Returns:
+            cos: torch.Tensor, (batch_size, seq_len, hidden_size)
+            sin: torch.Tensor, (batch_size, seq_len, hidden_size)
+        """
+        inv_freq_expanded = self.inv_freq[None, :, None].float().expand(position_ids.shape[0], -1, 1).to(x.device)
+        position_ids_expanded = position_ids[:, None, :].float()
+
+        device_type = x.device.type if isinstance(x.device.type, str) and x.device.type != "mps" else "cpu"
+        with torch.autocast(device_type=device_type, enabled=False):  # Force float32
+            freqs = (inv_freq_expanded.float() @ position_ids_expanded.float()).transpose(1, 2)
+            emb = torch.cat((freqs, freqs), dim=-1)
+            cos = emb.cos() * self.attention_scaling
+            sin = emb.sin() * self.attention_scaling
+
+        return cos.to(dtype=x.dtype), sin.to(dtype=x.dtype)
+
+
+def rotate_half(x):
+    """Rotates half the hidden dims of the input."""
+    x1 = x[..., : x.shape[-1] // 2]
+    x2 = x[..., x.shape[-1] // 2 :]
+    return torch.cat((-x2, x1), dim=-1)
+
+
+def apply_p_rope(q, k, cos, sin, position_ids=None, unsqueeze_dim=1, rope_percentage=1.0):
+    """
+    Applies p-RoPE (Partial Rotary Position Embedding) to the query and key tensors.
+    
+    Based on the paper 'Round and Round We Go! What Makes Rotary Positional Encodings Useful?',
+    p-RoPE truncates the lowest frequencies (which carry semantic information) to act as 
+    pure semantic channels, while keeping high frequencies for positional information.
+
+    Args:
+        q (`torch.Tensor`): The query tensor.
+        k (`torch.Tensor`): The key tensor.
+        cos (`torch.Tensor`): The cosine part of the rotary embedding.
+        sin (`torch.Tensor`): The sine part of the rotary embedding.
+        position_ids (`torch.Tensor`, *optional*): Deprecated and unused.
+        unsqueeze_dim (`int`, *optional*, defaults to 1):
+            The dimension along which to unsqueeze cos/sin.
+        rope_percentage (`float`, *optional*, defaults to 1.0):
+            The factor 'p' from the paper. 1.0 = Full RoPE, 0.0 = NoPE.
+            Represents the fraction of high-frequency components to rotate.
+
+    Returns:
+        `tuple(torch.Tensor)`: The query and key tensors with p-RoPE applied.
+    """
+    # 1. Standard broadcasting alignment (same as original API)
+    cos = cos.unsqueeze(unsqueeze_dim)
+    sin = sin.unsqueeze(unsqueeze_dim)
+
+    # 2. Apply p-RoPE masking if p < 1.0
+    # The paper states we should remove rotation for the *lowest* frequencies[cite: 71, 429].
+    # In standard Llama RoPE, indices 0 -> dim/2 correspond to High -> Low frequencies.
+    # Therefore, we keep the beginning (High Freq) and mask the end (Low Freq).
+    if rope_percentage < 1.0:
+        # Clone to avoid modifying cached sinusoidal embeddings in place
+        cos = cos.clone()
+        sin = sin.clone()
+        
+        head_dim = q.shape[-1]
+        half_dim = head_dim // 2
+        
+        # Calculate how many frequency bands to KEEP rotating (High Frequencies)
+        # rope_angles = int(rope_percentage * head_dim // 2) [cite: 858]
+        keep_bands = int(half_dim * rope_percentage)
+        
+        # The standard implementation repeats frequencies in the second half of the embedding.
+        # Structure: [Freq 0 ... Freq N, Freq 0 ... Freq N]
+        # We must mask the 'tail' of both halves.
+        
+        # Mask the low frequencies in the first half (set cos=1, sin=0 -> Identity/NoPE)
+        cos[..., keep_bands:half_dim] = 1.0
+        sin[..., keep_bands:half_dim] = 0.0
+        
+        # Mask the low frequencies in the second half
+        cos[..., (half_dim + keep_bands):] = 1.0
+        sin[..., (half_dim + keep_bands):] = 0.0
+
+    # 3. Apply rotation (Standard RoPE calculation)
+    # For masked dimensions: q_embed = q * 1 + rotate_half(q) * 0 = q (NoPE behavior) [cite: 91]
+    q_embed = (q * cos) + (rotate_half(q) * sin)
+    k_embed = (k * cos) + (rotate_half(k) * sin)
+    
+    return q_embed, k_embed
+
+
+# Modified gated_attention/blob/main/modeling_qwen3.py
+class GatedSdpaAttention(nn.Module):
+    """Gated Scaled Dot-Product Attention"""
+    def __init__(self, config: UTP2Config):
+        super().__init__()
+        assert config.hidden_size % config.num_attention_heads == 0
+        self.hidden_size = config.hidden_size
+        self.num_heads = config.num_attention_heads
+        self.head_dim = self.hidden_size // self.num_heads
+        self.rope_percentage = config.rope_percentage
+        self.attention_dropout = config.attention_dropout
+        
+        self.q_proj = nn.Linear(self.hidden_size, self.num_heads * self.head_dim * 2, bias=False)
+        self.k_proj = nn.Linear(self.hidden_size, self.num_heads * self.head_dim, bias=False)
+        self.v_proj = nn.Linear(self.hidden_size, self.num_heads * self.head_dim, bias=False)
+        self.o_proj = nn.Linear(self.num_heads * self.head_dim, self.hidden_size, bias=False)
+        self.q_norm = nn.RMSNorm(self.head_dim, eps=1e-6)
+        self.k_norm = nn.RMSNorm(self.head_dim, eps=1e-6)
+
+    def forward(self, h: torch.Tensor, position_embeddings: tuple[torch.Tensor, torch.Tensor], attention_mask: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            h: a tensor of shape (batch_size, seq_len, hidden_size)
+            position_embeddings: a tuple of (cos, sin) of shape (batch_size, seq_len, hidden_size)
+            attention_mask: a tensor of shape (batch_size, seq_len, seq_len)
+        Returns:
+            (batch_size, seq_len, hidden_size)
+        """
+        BN, L, E = h.shape
+        q = self.q_proj(h)
+        k = self.k_proj(h)
+        v = self.v_proj(h)
+
+        q = q.view(BN, L, self.num_heads, -1) # (BN, L, H, D*2)
+        q, gate_score = torch.split(q, [self.head_dim, self.head_dim], dim=-1)
+        # q: (BN, L, H, D)
+        # gate_score: (BN, L, H, D)
+        
+        q = q.transpose(1, 2) # (BN, H, L, D)
+        k = k.view(BN, L, self.num_heads, -1).transpose(1, 2)
+        v = v.view(BN, L, self.num_heads, -1).transpose(1, 2)
+
+        q = self.q_norm(q)
+        k = self.k_norm(k)
+
+        cos, sin = position_embeddings
+        q, k = apply_p_rope(q, k, cos, sin, rope_percentage=self.rope_percentage)
+
+        attn_output = F.scaled_dot_product_attention(
+            q, k, v,
+            attn_mask=attention_mask,
+            dropout_p=0.0 if not self.training else self.attention_dropout
+        )
+
+        attn_output = attn_output.transpose(1, 2).contiguous()
+        attn_output = attn_output * torch.sigmoid(gate_score)
+
+        attn_output = attn_output.reshape(BN, L, -1)
+        attn_output = self.o_proj(attn_output)
+
+        return attn_output
+        
+
+class TransformerDecoderLayer(nn.Module):
+    def __init__(self, config: UTP2Config):
+        super().__init__()
+        self.self_attn = GatedSdpaAttention(config)
+        self.mlp = MLP(config)
+        self.input_layernorm = nn.RMSNorm(config.hidden_size, eps=1e-6)
+        self.post_attention_layernorm = nn.RMSNorm(config.hidden_size, eps=1e-6)
+
+    def forward(self, h: torch.Tensor, position_embedding: tuple[torch.Tensor, torch.Tensor], attention_mask: torch.Tensor):
+        """
+        Args:
+            h: a tensor of shape (batch_size, seq_len, hidden_size)
+            position_embedding: a tuple of (cos, sin) of shape (batch_size, seq_len, hidden_size)
+            attention_mask: a tensor of shape (batch_size, seq_len, seq_len)
+        Returns:
+            (batch_size, seq_len, hidden_size)
+        """
+        residual = h
+        h = self.input_layernorm(h)
+        h = self.self_attn(h, position_embedding, attention_mask)
+        h = h + residual
+
+        residual = h
+        h = self.post_attention_layernorm(h)
+        h = self.mlp(h)
+        h = h + residual
+
+        return h
+
+
+class MLP(nn.Module):
+    def __init__(self, config: UTP2Config):
+        super().__init__()
+        self.config = config
+        self.hidden_size = config.hidden_size
+        self.intermediate_size = config.intermediate_size
+        self.gate_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False)
+        self.up_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False)
+        self.down_proj = nn.Linear(self.intermediate_size, self.hidden_size, bias=False)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            x: a tensor of shape (batch_size, seq_len, hidden_size)
+        Output:
+            (batch_size, seq_len, hidden_size)
+        """
+        return self.down_proj(torch.sigmoid(self.gate_proj(x)) * self.up_proj(x))
+
+
+class TSEncoder(nn.Module):
+    """A MLP encoder for time series data."""
+    def __init__(self, config: UTP2Config):
+        super().__init__()
+        self.hidden_size = config.hidden_size
+        self.intermediate_size = config.intermediate_size
+        self.gate_proj = nn.Linear(config.patch_size * 2, self.intermediate_size, bias=False)
+        self.up_proj = nn.Linear(config.patch_size * 2, self.intermediate_size, bias=False)
+        self.down_proj = nn.Linear(self.intermediate_size, self.hidden_size, bias=False)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            x: a tensor of shape (batch_size, num_patches, patch_size * 2)
+        Output:
+            (batch_size, num_patches, patch_size * 2)
+        """
+        return self.down_proj(torch.sigmoid(self.gate_proj(x)) * self.up_proj(x))
+
+
+class QuantilePredictHead(nn.Module):
+    def __init__(self, config: UTP2Config):
+        super().__init__()
+        self.embed_dim = config.hidden_size
+        self.mlp_hidden_dim = config.intermediate_size
+        self.num_quantiles = len(config.quantiles)
+        self.gate_proj = nn.Linear(self.embed_dim, self.mlp_hidden_dim)
+        self.up_proj = nn.Linear(self.embed_dim, self.mlp_hidden_dim)
+        self.down_proj = nn.Linear(self.mlp_hidden_dim, self.num_quantiles * config.patch_size)
+
+    def forward(self, h: torch.Tensor) -> torch.Tensor:
+        """
+        Inputs:
+            h: a tensor of shape (batch_size, seq_len, hidden_size)
+        Output:
+            (batch_size, seq_len, patch_size * num_quantiles)
+        """
+        return self.down_proj(self.up_proj(h) * torch.sigmoid(self.gate_proj(h)))
+
+
+# Copied from https://github.com/amazon-science/chronos-forecasting/blob/main/src/chronos/chronos_bolt.py
+class InstanceNorm(nn.Module):
+    """
+    Apply standardization along the last dimension and optionally apply arcsinh after standardization.
+    """
+    def __init__(self, eps: float = 1e-5, use_arcsinh: bool = False) -> None:
+        super().__init__()
+        self.eps = eps
+        self.use_arcsinh = use_arcsinh
+
+    def forward(
+        self, x: torch.Tensor, loc_scale: tuple[torch.Tensor, torch.Tensor] | None = None
+    ) -> tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
+        orig_dtype = x.dtype
+        x = x.to(torch.float32)
+        if loc_scale is None:
+            loc = torch.nan_to_num(torch.nanmean(x, dim=-1, keepdim=True), nan=0.0)
+            scale = torch.nan_to_num((x - loc).square().nanmean(dim=-1, keepdim=True).sqrt(), nan=1.0)
+            scale = torch.where(scale == 0, self.eps, scale)
+        else:
+            loc, scale = loc_scale
+        scaled_x = (x - loc) / scale
+        if self.use_arcsinh:
+            scaled_x = torch.arcsinh(scaled_x)
+        return scaled_x.to(orig_dtype), (loc, scale)
+
+    def inverse(self, x: torch.Tensor, loc_scale: tuple[torch.Tensor, torch.Tensor]) -> torch.Tensor:
+        orig_dtype = x.dtype
+        x = x.to(torch.float32)
+        loc, scale = loc_scale
+        if self.use_arcsinh:
+            x = torch.sinh(x)
+        x = x * scale + loc
+        return x.to(orig_dtype)
+
+
+# Copied from https://github.com/amazon-science/chronos-forecasting/blob/main/src/chronos/chronos_bolt.py
+class Patch(nn.Module):
+    """
+    Patch along the last dimension of the input tensor.
+    """
+    def __init__(self, patch_size: int, patch_stride: int) -> None:
+        super().__init__()
+        self.patch_size = patch_size
+        self.patch_stride = patch_stride
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            x: a tensor of shape (batch_size, seq_len)
+        Output:
+            (batch_size, num_patches, patch_size)
+        """
+        length = x.shape[-1]
+
+        if length % self.patch_size != 0:
+            padding_size = (
+                *x.shape[:-1],
+                self.patch_size - (length % self.patch_size),
+            )
+            padding = torch.full(size=padding_size, fill_value=torch.nan, dtype=x.dtype, device=x.device)
+            x = torch.concat((padding, x), dim=-1)
+
+        x = x.unfold(dimension=-1, size=self.patch_size, step=self.patch_stride)
+        return x
