@@ -132,6 +132,14 @@ class BLASTDataset(Dataset):
         inputs = np.nan_to_num(inputs, nan=0.0)
         labels = np.nan_to_num(labels, nan=0.0)
 
+        # Randomly mask first few points of inputs
+        mask_len = np.random.randint(0, self.context_length - self.min_context_length)
+        valid_indices = np.where(input_mask)[0]
+        if len(valid_indices) > 0:
+            mask_indices = valid_indices[:mask_len]
+            input_mask[mask_indices] = False
+            inputs[mask_indices] = 0.0
+
         return {'inputs': inputs, 'labels': labels, 'input_mask': input_mask, 'target_mask': target_mask}
     
     def __len__(self):

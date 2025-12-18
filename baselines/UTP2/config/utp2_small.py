@@ -14,19 +14,19 @@ from ..loss import fake_loss
 
 MODEL_ARCH = UTP2Pretrain
 
-context_length = 2048
-predict_length = 64
+context_length = 1200
+predict_length = 60
 
 UTP2_CONFIG = UTP2Config(
     quantiles=[0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9],
-    patch_size=16,
+    patch_size=12,
     rope_percentage=0.75,
-    max_input_patches=128,
-    max_output_patches=4,
-    hidden_size=384,
-    intermediate_size=1536,
-    num_layers=6,
-    num_attention_heads=12,
+    max_input_patches=100,
+    max_output_patches=60,
+    hidden_size=256,
+    intermediate_size=1024,
+    num_layers=4,
+    num_attention_heads=8,
     rope_theta=10000.0,
     attention_dropout=0.0,
 )

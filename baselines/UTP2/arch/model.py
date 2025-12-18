@@ -56,4 +56,7 @@ class UTP2Pretrain(nn.Module):
             predictions: torch.Tensor, shape (batch_size, prediction_length)
         """
         predictions = self.utp2.predict(context, prediction_length=prediction_length)
-        return predictions
+        # predictions shape: (batch_size, prediction_length, num_quantiles)
+        median_idx = self.config.quantiles.index(0.5)
+        return predictions[:, :, median_idx]
+        
