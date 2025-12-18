@@ -134,11 +134,8 @@ class BLASTDataset(Dataset):
 
         # Randomly mask first few points of inputs
         mask_len = np.random.randint(0, self.context_length - self.min_context_length)
-        valid_indices = np.where(input_mask)[0]
-        if len(valid_indices) > 0:
-            mask_indices = valid_indices[:mask_len]
-            input_mask[mask_indices] = False
-            inputs[mask_indices] = 0.0
+        input_mask[:mask_len] = False
+        inputs[:mask_len] = 0.0
 
         return {'inputs': inputs, 'labels': labels, 'input_mask': input_mask, 'target_mask': target_mask}
     
