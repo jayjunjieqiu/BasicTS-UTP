@@ -1,7 +1,7 @@
 import torch
 from torch import nn
 import torch.nn.functional as F
-from typing import Optional
+from typing import Optional, Union, List, Tuple
 from dataclasses import dataclass, asdict
 
 @dataclass
@@ -82,7 +82,7 @@ class UTP2(nn.Module):
         outputs = self.instance_norm.inverse(outputs, loc_scale)
         return outputs
 
-    def predict(self, context: Optional[torch.Tensor|list[torch.Tensor]], prediction_length: int = 0) -> torch.Tensor:
+    def predict(self, context: Optional[Union[torch.Tensor, List[torch.Tensor]]], prediction_length: int = 0) -> torch.Tensor:
         """
         Args:
             context: torch.Tensor, shape (batch_size, input_length) or list of 1D torch.Tensor
@@ -524,8 +524,8 @@ class InstanceNorm(nn.Module):
         self.use_arcsinh = use_arcsinh
 
     def forward(
-        self, x: torch.Tensor, loc_scale: tuple[torch.Tensor, torch.Tensor] | None = None
-    ) -> tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
+        self, x: torch.Tensor, loc_scale: Optional[Tuple[torch.Tensor, torch.Tensor]] = None
+    ) -> Tuple[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         orig_dtype = x.dtype
         x = x.to(torch.float32)
         if loc_scale is None:
