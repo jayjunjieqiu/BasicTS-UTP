@@ -1,4 +1,5 @@
 from typing import Dict, Union, Tuple, Optional
+import random
 import torch
 from torch import nn
 import torch.nn.functional as F
@@ -38,7 +39,14 @@ class UTP2Runner(BaseUniversalTimeSeriesForecastingRunner):
             
         patch_size = config.patch_size
         target_length = labels.shape[1]
-        num_output_patches = (target_length + patch_size - 1) // patch_size
+        max_possible_patches = (target_length + patch_size - 1) // patch_size
+        
+        if kwargs.get('train', False):
+            max_output_patches = config.max_output_patches
+            upper_bound = min(max_output_patches, max_possible_patches)
+            num_output_patches = random.randint(1, upper_bound)
+        else:
+            num_output_patches = max_possible_patches
         
         # Forward pass
         # predictions: (B, num_output_patches * patch_size, num_quantiles)
@@ -52,6 +60,9 @@ class UTP2Runner(BaseUniversalTimeSeriesForecastingRunner):
             labels = F.pad(labels, (0, pad_len), value=0.0)
             # Pad mask with 0 (ignored)
             target_mask = F.pad(target_mask, (0, pad_len), value=0.0)
+        elif pred_len < target_length:
+            labels = labels[:, :pred_len]
+            target_mask = target_mask[:, :pred_len]
         
         # Compute Loss
         quantiles = config.quantiles
