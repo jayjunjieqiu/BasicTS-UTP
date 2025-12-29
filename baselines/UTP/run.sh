@@ -1,1 +1,0 @@
-python experiments/evaluate.py -cfg baselines/UTP/evaluate_config/PEMS07/utp_base.py -g 1 -ckpt checkpoints/UTP/BLAST_100000/utp_base/UTP_best_val_loss.pt -ctx 96 -pred 96
