@@ -1,6 +1,8 @@
 import os
 import sys
 from easydict import EasyDict
+
+from baselines.UTP2.arch.utp import Patch
 sys.path.append(os.path.abspath(__file__ + '/../../..'))
 
 from ..arch import UTP2Pretrain, UTP2Config
@@ -24,10 +26,10 @@ UTP2_CONFIG = UTP2Config(
     rope_percentage=0.75,
     max_input_patches=context_length // patch_size,
     max_output_patches=predict_length // patch_size,
-    hidden_size=512,
-    intermediate_size=2048,
-    num_layers=6,
-    num_attention_heads=8,
+    hidden_size=256,
+    intermediate_size=1024,
+    num_layers=3,
+    num_attention_heads=4,
     rope_theta=10000.0,
     attention_dropout=0.0,
 )

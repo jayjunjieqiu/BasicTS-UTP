@@ -1,8 +1,10 @@
 import torch
 from torch import nn
 import torch.nn.functional as F
-from typing import Optional, Union, List, Tuple
+from typing import Optional, Union, List, Tuple, Callable
 from dataclasses import dataclass, asdict
+from einops import rearrange, repeat
+from .utils import weighted_quantile, interpolate_quantiles
 
 @dataclass
 class UTP2Config:
@@ -27,7 +29,7 @@ class UTP2(nn.Module):
         self.rotary_emb = RotaryEmbedding(config)
         self.ts_encoder = TSEncoder(config)
         self.encoder_layers = nn.ModuleList([
-            TransformerDecoderLayer(config) for _ in range(config.num_layers)
+            TransformerEncoderLayer(config) for _ in range(config.num_layers)
         ])
         self.predict_head = QuantilePredictHead(config)
         self.instance_norm = InstanceNorm(config.use_arcsinh)
@@ -82,15 +84,35 @@ class UTP2(nn.Module):
         outputs = self.instance_norm.inverse(outputs, loc_scale)
         return outputs
 
-    def predict(self, context: Optional[Union[torch.Tensor, List[torch.Tensor]]], prediction_length: int = 0) -> torch.Tensor:
+    @staticmethod
+    def _get_prob_mass_per_quantile_level(quantile_levels: torch.Tensor) -> torch.Tensor:
+        """
+        Computes normalized probability masses for quantile levels using trapezoidal rule approximation.
+        """
+        assert quantile_levels.ndim == 1
+        assert quantile_levels.min() > 0.0 and quantile_levels.max() < 1.0
+
+        device = quantile_levels.device
+        boundaries = torch.cat(
+            [torch.tensor([0.0], device=device), quantile_levels, torch.tensor([1.0], device=device)]
+        )
+        prob_mass = (boundaries[2:] - boundaries[:-2]) / 2
+        return prob_mass / prob_mass.sum()
+
+    def predict(self, context: Optional[Union[torch.Tensor, List[torch.Tensor]]], prediction_length: int = 0,
+                unrolled_quantiles: list = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]) -> torch.Tensor:
         """
         Args:
             context: torch.Tensor, shape (batch_size, input_length) or list of 1D torch.Tensor
             prediction_length: int, the length of output
+            unrolled_quantiles: list, the quantiles to predict
         Returns:
             predictions: torch.Tensor, shape (batch_size, prediction_length, num_quantiles)
         
-        # If context series have different lengths, left-pad each one with NaNs to the maximum length among them.
+        If context series have different lengths, left-pad each one with NaNs to the maximum length among them.
+        unrolled_quantiles: The set of quantiles to use when making long-horizon predictions; must be a subset of the model's default quantiles. These quantiles
+        are appended to the historical context and input into the model autoregressively to generate long-horizon predictions. Note that the
+        effective batch size increases by a factor of `len(unrolled_quantiles)` when making long-horizon predictions.
         """
         # 1. Convert list of tensors to a single tensor if necessary
         if isinstance(context, list):
@@ -109,41 +131,81 @@ class UTP2(nn.Module):
         patch_size = self.config.patch_size
         num_output_patches = (prediction_length + patch_size - 1) // patch_size
         
-        if num_output_patches <= self.config.max_output_patches:
-            predictions = self(context, context_mask, num_output_patches)
-            return predictions[:, :prediction_length]
-        else:
-            # If the required number of output patches exceeds the max limit,
-            # use a rolling window approach.
-            predictions = []
-            current_context = context
-            current_context_mask = context_mask
+        # Predict first set of patches up to max_output_patches
+        step_patches = min(num_output_patches, self.config.max_output_patches)
+        predictions = []
+        
+        # First step prediction
+        prediction = self(context, context_mask, step_patches) # (B, step_len, Q)
+        predictions.append(prediction)
+        
+        remaining_patches = num_output_patches - step_patches
+        
+        if remaining_patches > 0:
+            # Prepare for long horizon unrolling
+            unrolled_quantiles_tensor = torch.tensor(unrolled_quantiles, device=context.device, dtype=torch.float32)
             
-            remaining_patches = num_output_patches
+            # Compute sample weights
+            unrolled_sample_weights = torch.outer(
+                self._get_prob_mass_per_quantile_level(unrolled_quantiles_tensor),
+                self._get_prob_mass_per_quantile_level(torch.tensor(self.config.quantiles, device=context.device, dtype=torch.float32)),
+            )
+            
+            # Expand context and mask
+            # context: (B, T) -> (B, N_unroll, T)
+            context = repeat(context, "b t -> b q t", q=len(unrolled_quantiles))
+            context_mask = repeat(context_mask, "b t -> b q t", q=len(unrolled_quantiles))
+            
             while remaining_patches > 0:
                 step_patches = min(remaining_patches, self.config.max_output_patches)
-                step_preds = self(current_context, current_context_mask, step_patches) # (B, step_len, Q)
-                predictions.append(step_preds)
                 
-                # Update context for next step
-                quantiles = self.config.quantiles
-                try:
-                    median_idx = quantiles.index(0.5)
-                except ValueError:
-                    # Fallback to middle index
-                    median_idx = len(quantiles) // 2
-                step_values = step_preds[..., median_idx] # (B, step_len)
-                current_context = torch.cat([current_context, step_values], dim=1)
-                # Mark appended predictions as observed (or unobserved? usually observed for AR)
-                # But since they are predictions, maybe we should treat them as observed context for next step.
-                # Let's mark them as observed (1.0).
-                step_mask = torch.ones_like(step_values)
-                current_context_mask = torch.cat([current_context_mask, step_mask], dim=1)
+                # Interpolate prediction to unrolled quantiles
+                # prediction: (B, H, Q)
+                # prediction_unrolled: (B, H, N_unroll)
+                prediction_unrolled = interpolate_quantiles(
+                    query_quantile_levels=unrolled_quantiles_tensor,
+                    original_quantile_levels=self.config.quantiles,
+                    original_values=prediction, 
+                )
                 
+                # Append to context
+                # prediction_unrolled: (B, H, N_unroll) -> (B, N_unroll, H)
+                prediction_unrolled = rearrange(prediction_unrolled, "b h q -> b q h")
+                context = torch.cat([context, prediction_unrolled], dim=-1)
+                
+                # Update mask
+                step_mask = torch.ones_like(prediction_unrolled)
+                context_mask = torch.cat([context_mask, step_mask], dim=-1)
+                
+                # Predict next step
+                # context: (B, N_unroll, T+H) -> (B*N_unroll, T+H)
+                flattened_context = rearrange(context, "b q t -> (b q) t")
+                flattened_mask = rearrange(context_mask, "b q t -> (b q) t")
+                
+                # step_pred: (B*N_unroll, step_H, Q)
+                step_pred = self(flattened_context, flattened_mask, step_patches)
+                
+                # Aggregate predictions
+                # step_pred: (B*N, H, Q) -> (B, N*Q, H) -> (B, H, N*Q)
+                n_paths = len(unrolled_quantiles)
+                step_pred_agg = rearrange(step_pred, "(b n) h q -> b h (n q)", n=n_paths)
+                
+                # weighted_quantile expects samples to be (..., num_samples)
+                # weights: (N, Q) -> (N*Q)
+                flat_weights = rearrange(unrolled_sample_weights, "n q -> (n q)")
+                
+                prediction = weighted_quantile(
+                    query_quantile_levels=self.config.quantiles,
+                    sample_weights=flat_weights,
+                    samples=step_pred_agg
+                )
+                # prediction: (B, H, Q)
+                
+                predictions.append(prediction)
                 remaining_patches -= step_patches
-            
-            predictions = torch.cat(predictions, dim=1)
-            return predictions[:, :prediction_length]
+        
+        predictions = torch.cat(predictions, dim=1)
+        return predictions[:, :prediction_length]
         
 
     def _prepare_patched_context(self, context: torch.Tensor, context_mask: torch.Tensor):
@@ -423,7 +485,7 @@ class GatedSdpaAttention(nn.Module):
         return attn_output
         
 
-class TransformerDecoderLayer(nn.Module):
+class TransformerEncoderLayer(nn.Module):
     def __init__(self, config: UTP2Config):
         super().__init__()
         self.self_attn = GatedSdpaAttention(config)

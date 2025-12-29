@@ -41,6 +41,7 @@ class UTP2Runner(BaseUniversalTimeSeriesForecastingRunner):
         target_length = labels.shape[1]
         max_possible_patches = (target_length + patch_size - 1) // patch_size
         
+        # Randomly sample number of output patches during training
         if kwargs.get('train', False):
             max_output_patches = config.max_output_patches
             upper_bound = min(max_output_patches, max_possible_patches)

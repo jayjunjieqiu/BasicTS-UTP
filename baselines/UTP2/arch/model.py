@@ -6,9 +6,10 @@ class UTP2Pretrain(nn.Module):
     """
     The UTP2-BasicTS wrapper for pretraining.
     """
-    def __init__(self, config: UTP2Config, from_pretrained: str = None):
+    def __init__(self, config: UTP2Config, from_pretrained: str = None, unrolled_quantiles: list = [0.5]):
         super().__init__()
         self.config = config
+        self.unrolled_quantiles = unrolled_quantiles
         self.utp2 = UTP2(config)
         if from_pretrained is not None:
             # load_state_dict only updates registered parameters (learnable weigths) and buffers
@@ -55,7 +56,7 @@ class UTP2Pretrain(nn.Module):
         Output:
             predictions: torch.Tensor, shape (batch_size, prediction_length)
         """
-        predictions = self.utp2.predict(context, prediction_length=prediction_length)
+        predictions = self.utp2.predict(context, prediction_length=prediction_length, unrolled_quantiles=self.unrolled_quantiles)
         # predictions shape: (batch_size, prediction_length, num_quantiles)
         median_idx = self.config.quantiles.index(0.5)
         return predictions[:, :, median_idx]
