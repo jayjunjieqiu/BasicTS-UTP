@@ -439,7 +439,7 @@ class GatedSdpaAttention(nn.Module):
         self.q_norm = nn.RMSNorm(self.head_dim, eps=1e-6)
         self.k_norm = nn.RMSNorm(self.head_dim, eps=1e-6)
 
-    def forward(self, h: torch.Tensor, position_embeddings: tuple[torch.Tensor, torch.Tensor], attention_mask: torch.Tensor) -> torch.Tensor:
+    def forward(self, h: torch.Tensor, position_embeddings: Tuple[torch.Tensor, torch.Tensor], attention_mask: torch.Tensor) -> torch.Tensor:
         """
         Args:
             h: a tensor of shape (batch_size, seq_len, hidden_size)
