@@ -29,7 +29,7 @@ UTP2_CONFIG = UTP2Config(
     num_layers=4,
     num_attention_heads=6,
     rope_theta=10000.0,
-    attention_dropout=0.0,
+    dropout=0.1,
 )
 
 MODEL_PARAM = {
@@ -80,14 +80,15 @@ CFG.TRAIN.OPTIM = EasyDict()
 CFG.TRAIN.OPTIM.TYPE = "AdamW"
 CFG.TRAIN.OPTIM.PARAM = {
     "lr": 1e-3,
-    "betas": (0.9, 0.95),
     "fused": True
 }
 CFG.TRAIN.LR_SCHEDULER = EasyDict()
-CFG.TRAIN.LR_SCHEDULER.TYPE = "CosineWarmup"
+CFG.TRAIN.LR_SCHEDULER.TYPE = "WSDSchedule"
 CFG.TRAIN.LR_SCHEDULER.PARAM = {
     'num_warmup_steps': int(NUM_ITERATIONS / 100 * 10), # 10%的warmup启动比例
     'num_training_steps': NUM_ITERATIONS,
+    'decay_type': 'sqrt',
+    'fract_decay': 0.4,
 }
 CFG.TRAIN.CLIP_GRAD_PARAM = {
     'max_norm': 1.0

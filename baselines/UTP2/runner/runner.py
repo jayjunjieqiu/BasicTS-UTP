@@ -28,8 +28,10 @@ class UTP2Runner(BaseUniversalTimeSeriesForecastingRunner):
         input_mask = self.to_running_device(data['input_mask']) # (B, L_in)
         target_mask = self.to_running_device(data['target_mask']) # (B, L_out)
 
-        # Fill NaNs in inputs with 0 (since mask handles it)
-        inputs = torch.nan_to_num(inputs, nan=0.0)
+        # Fill NaNs in labels with 0 (since label_mask handles it)
+        # We do not fill NaNs in inputs with 0, as we want to calculate the mean and std of inputs
+        # in model's forward pass.
+        labels = torch.nan_to_num(labels, nan=0.0)
         
         # Get config
         if hasattr(self.model, 'module'):

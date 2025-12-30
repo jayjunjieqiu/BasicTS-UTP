@@ -128,14 +128,10 @@ class BLASTDataset(Dataset):
         input_mask = np.logical_not(np.isnan(inputs))
         target_mask = np.logical_not(np.isnan(labels))
 
-        # Fill NaNs in inputs and labels with 0 (since mask handles it)
-        inputs = np.nan_to_num(inputs, nan=0.0)
-        labels = np.nan_to_num(labels, nan=0.0)
-
         # Randomly mask first few points of inputs
         mask_len = np.random.randint(0, self.context_length - self.min_context_length)
         input_mask[:mask_len] = False
-        inputs[:mask_len] = 0.0
+        inputs[:mask_len] = np.nan
 
         return {'inputs': inputs, 'labels': labels, 'input_mask': input_mask, 'target_mask': target_mask}
     

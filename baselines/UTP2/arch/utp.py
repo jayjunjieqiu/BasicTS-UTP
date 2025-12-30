@@ -17,9 +17,8 @@ class UTP2Config:
     intermediate_size: int
     num_layers: int
     num_attention_heads: int
-    use_arcsinh: bool = True
     rope_theta: float = 10000.0
-    attention_dropout: float = 0.0
+    dropout: float = 0.0
 
 class UTP2(nn.Module):
     def __init__(self, config: UTP2Config):
@@ -32,7 +31,7 @@ class UTP2(nn.Module):
             TransformerEncoderLayer(config) for _ in range(config.num_layers)
         ])
         self.predict_head = QuantilePredictHead(config)
-        self.instance_norm = InstanceNorm(config.use_arcsinh)
+        self.instance_norm = InstanceNorm()
         self.patch = Patch(config.patch_size, config.patch_size)
 
     def forward(self, context: torch.Tensor, context_mask: torch.Tensor, num_output_patches: int) -> torch.Tensor:
@@ -59,6 +58,7 @@ class UTP2(nn.Module):
         position_ids = torch.arange(0, h.shape[1], dtype=torch.long, device=h.device)
         position_ids = position_ids.unsqueeze(0).expand(bs, -1) # (B, P+1)
         cos, sin = self.rotary_emb(h, position_ids)
+        cos, sin = mask_rope_cos_sin(cos, sin, self.config.rope_percentage)
 
         # 4. Build attention mask
         attention_mask = torch.cat([
@@ -99,6 +99,7 @@ class UTP2(nn.Module):
         prob_mass = (boundaries[2:] - boundaries[:-2]) / 2
         return prob_mass / prob_mass.sum()
 
+    @torch.no_grad()
     def predict(self, context: Optional[Union[torch.Tensor, List[torch.Tensor]]], prediction_length: int = 0,
                 unrolled_quantiles: list = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]) -> torch.Tensor:
         """
@@ -112,18 +113,23 @@ class UTP2(nn.Module):
         If context series have different lengths, left-pad each one with NaNs to the maximum length among them.
         unrolled_quantiles: The set of quantiles to use when making long-horizon predictions; must be a subset of the model's default quantiles. These quantiles
         are appended to the historical context and input into the model autoregressively to generate long-horizon predictions. Note that the
-        effective batch size increases by a factor of `len(unrolled_quantiles)` when making long-horizon predictions.
+        effective batch size increases by multiplying `len(unrolled_quantiles)` when making long-horizon predictions.
         """
+        self.eval()
         # 1. Convert list of tensors to a single tensor if necessary
         if isinstance(context, list):
             # 1. Pad each tensor in the list to the maximum length
             max_len = max(tensor.shape[0] for tensor in context)
-            padded_tensors = []
-            for tensor in context:
-                padding = torch.full((max_len - tensor.shape[0],), float('nan'), device=tensor.device)
-                padded_tensor = torch.cat([padding, tensor], dim=0)
-                padded_tensors.append(padded_tensor)
-            context = torch.stack(padded_tensors, dim=0)
+            batch_size = len(context)
+            padded_context = torch.full(
+                (batch_size, max_len), 
+                float('nan'), 
+                device=context[0].device, 
+                dtype=context[0].dtype
+            )
+            for i, tensor in enumerate(context):
+                padded_context[i, -tensor.shape[0]:] = tensor
+            context = padded_context
 
         context_mask = (~torch.isnan(context)).float()
 
@@ -302,7 +308,10 @@ class UTP2(nn.Module):
 
 # Modified transformers.models.llama.modeling_llama.LlamaRotaryEmbedding
 class RotaryEmbedding(nn.Module):
-    inv_freq: torch.Tensor  # fix linting for `register_buffer`
+    inv_freq: torch.Tensor
+    cos_cached: torch.Tensor
+    sin_cached: torch.Tensor
+
     def __init__(self, config: UTP2Config, device=None):
         super().__init__()
         self.config = config
@@ -312,6 +321,14 @@ class RotaryEmbedding(nn.Module):
 
         self.register_buffer("inv_freq", inv_freq, persistent=False)
         self.original_inv_freq = inv_freq
+
+        # Pre-compute and cache cos/sin
+        self.max_seq_len_cached = config.max_input_patches + config.max_output_patches + 16
+        t = torch.arange(self.max_seq_len_cached, device=device, dtype=inv_freq.dtype)
+        freqs = torch.einsum("i,j->ij", t, inv_freq)
+        emb = torch.cat((freqs, freqs), dim=-1)
+        self.register_buffer("cos_cached", emb.cos() * self.attention_scaling, persistent=False)
+        self.register_buffer("sin_cached", emb.sin() * self.attention_scaling, persistent=False)
 
     @staticmethod
     def compute_default_rope_parameters(
@@ -329,7 +346,6 @@ class RotaryEmbedding(nn.Module):
         )
         return inv_freq, attention_factor
 
-    @torch.no_grad()
     def forward(self, x, position_ids):
         """
         Args:
@@ -339,6 +355,17 @@ class RotaryEmbedding(nn.Module):
             cos: torch.Tensor, (batch_size, seq_len, hidden_size)
             sin: torch.Tensor, (batch_size, seq_len, hidden_size)
         """
+        # Support dynamic resizing if needed (though unlikely with fixed config)
+        seq_len = position_ids.max() + 1
+        if seq_len > self.max_seq_len_cached:
+            return self._forward_dynamic(x, position_ids)
+            
+        return (
+            F.embedding(position_ids, self.cos_cached).to(dtype=x.dtype),
+            F.embedding(position_ids, self.sin_cached).to(dtype=x.dtype)
+        )
+
+    def _forward_dynamic(self, x, position_ids):
         inv_freq_expanded = self.inv_freq[None, :, None].float().expand(position_ids.shape[0], -1, 1).to(x.device)
         position_ids_expanded = position_ids[:, None, :].float()
 
@@ -359,66 +386,37 @@ def rotate_half(x):
     return torch.cat((-x2, x1), dim=-1)
 
 
-def apply_p_rope(q, k, cos, sin, position_ids=None, unsqueeze_dim=1, rope_percentage=1.0):
+def mask_rope_cos_sin(cos, sin, rope_percentage):
     """
-    Applies p-RoPE (Partial Rotary Position Embedding) to the query and key tensors.
+    Applies p-RoPE masking to the cosine and sine tensors.
+    """
+    if rope_percentage >= 1.0:
+        return cos, sin
+        
+    cos = cos.clone()
+    sin = sin.clone()
     
-    Based on the paper 'Round and Round We Go! What Makes Rotary Positional Encodings Useful?',
-    p-RoPE truncates the lowest frequencies (which carry semantic information) to act as 
-    pure semantic channels, while keeping high frequencies for positional information.
+    head_dim = cos.shape[-1]
+    half_dim = head_dim // 2
+    keep_bands = int(half_dim * rope_percentage)
+    
+    # Mask low frequencies
+    cos[..., keep_bands:half_dim] = 1.0
+    sin[..., keep_bands:half_dim] = 0.0
+    cos[..., (half_dim + keep_bands):] = 1.0
+    sin[..., (half_dim + keep_bands):] = 0.0
+    
+    return cos, sin
 
-    Args:
-        q (`torch.Tensor`): The query tensor.
-        k (`torch.Tensor`): The key tensor.
-        cos (`torch.Tensor`): The cosine part of the rotary embedding.
-        sin (`torch.Tensor`): The sine part of the rotary embedding.
-        position_ids (`torch.Tensor`, *optional*): Deprecated and unused.
-        unsqueeze_dim (`int`, *optional*, defaults to 1):
-            The dimension along which to unsqueeze cos/sin.
-        rope_percentage (`float`, *optional*, defaults to 1.0):
-            The factor 'p' from the paper. 1.0 = Full RoPE, 0.0 = NoPE.
-            Represents the fraction of high-frequency components to rotate.
 
-    Returns:
-        `tuple(torch.Tensor)`: The query and key tensors with p-RoPE applied.
+def apply_rotary_pos_emb(q, k, cos, sin, unsqueeze_dim=1):
     """
-    # 1. Standard broadcasting alignment (same as original API)
+    Applies rotary position embedding to query and key tensors.
+    """
     cos = cos.unsqueeze(unsqueeze_dim)
     sin = sin.unsqueeze(unsqueeze_dim)
-
-    # 2. Apply p-RoPE masking if p < 1.0
-    # The paper states we should remove rotation for the *lowest* frequencies[cite: 71, 429].
-    # In standard Llama RoPE, indices 0 -> dim/2 correspond to High -> Low frequencies.
-    # Therefore, we keep the beginning (High Freq) and mask the end (Low Freq).
-    if rope_percentage < 1.0:
-        # Clone to avoid modifying cached sinusoidal embeddings in place
-        cos = cos.clone()
-        sin = sin.clone()
-        
-        head_dim = q.shape[-1]
-        half_dim = head_dim // 2
-        
-        # Calculate how many frequency bands to KEEP rotating (High Frequencies)
-        # rope_angles = int(rope_percentage * head_dim // 2) [cite: 858]
-        keep_bands = int(half_dim * rope_percentage)
-        
-        # The standard implementation repeats frequencies in the second half of the embedding.
-        # Structure: [Freq 0 ... Freq N, Freq 0 ... Freq N]
-        # We must mask the 'tail' of both halves.
-        
-        # Mask the low frequencies in the first half (set cos=1, sin=0 -> Identity/NoPE)
-        cos[..., keep_bands:half_dim] = 1.0
-        sin[..., keep_bands:half_dim] = 0.0
-        
-        # Mask the low frequencies in the second half
-        cos[..., (half_dim + keep_bands):] = 1.0
-        sin[..., (half_dim + keep_bands):] = 0.0
-
-    # 3. Apply rotation (Standard RoPE calculation)
-    # For masked dimensions: q_embed = q * 1 + rotate_half(q) * 0 = q (NoPE behavior) [cite: 91]
     q_embed = (q * cos) + (rotate_half(q) * sin)
     k_embed = (k * cos) + (rotate_half(k) * sin)
-    
     return q_embed, k_embed
 
 
@@ -431,8 +429,7 @@ class GatedSdpaAttention(nn.Module):
         self.hidden_size = config.hidden_size
         self.num_heads = config.num_attention_heads
         self.head_dim = self.hidden_size // self.num_heads
-        self.rope_percentage = config.rope_percentage
-        self.attention_dropout = config.attention_dropout
+        self.dropout = config.dropout
         
         self.q_proj = nn.Linear(self.hidden_size, self.num_heads * self.head_dim * 2, bias=False)
         self.k_proj = nn.Linear(self.hidden_size, self.num_heads * self.head_dim, bias=False)
@@ -468,12 +465,12 @@ class GatedSdpaAttention(nn.Module):
         k = self.k_norm(k)
 
         cos, sin = position_embeddings
-        q, k = apply_p_rope(q, k, cos, sin, rope_percentage=self.rope_percentage)
+        q, k = apply_rotary_pos_emb(q, k, cos, sin)
 
         attn_output = F.scaled_dot_product_attention(
             q, k, v,
             attn_mask=attention_mask,
-            dropout_p=0.0 if not self.training else self.attention_dropout
+            dropout_p=0.0 if not self.training else self.dropout
         )
 
         attn_output = attn_output.transpose(1, 2).contiguous()
@@ -492,6 +489,7 @@ class TransformerEncoderLayer(nn.Module):
         self.mlp = MLP(config)
         self.input_layernorm = nn.RMSNorm(config.hidden_size, eps=1e-6)
         self.post_attention_layernorm = nn.RMSNorm(config.hidden_size, eps=1e-6)
+        self.dropout = nn.Dropout(config.dropout)
 
     def forward(self, h: torch.Tensor, position_embedding: tuple[torch.Tensor, torch.Tensor], attention_mask: torch.Tensor):
         """
@@ -505,11 +503,13 @@ class TransformerEncoderLayer(nn.Module):
         residual = h
         h = self.input_layernorm(h)
         h = self.self_attn(h, position_embedding, attention_mask)
+        h = self.dropout(h)
         h = h + residual
 
         residual = h
         h = self.post_attention_layernorm(h)
         h = self.mlp(h)
+        h = self.dropout(h)
         h = h + residual
 
         return h
@@ -544,6 +544,7 @@ class TSEncoder(nn.Module):
         self.gate_proj = nn.Linear(config.patch_size * 2, self.intermediate_size, bias=False)
         self.up_proj = nn.Linear(config.patch_size * 2, self.intermediate_size, bias=False)
         self.down_proj = nn.Linear(self.intermediate_size, self.hidden_size, bias=False)
+        self.dropout = nn.Dropout(config.dropout)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -552,7 +553,10 @@ class TSEncoder(nn.Module):
         Output:
             (batch_size, num_patches, patch_size * 2)
         """
-        return self.down_proj(torch.sigmoid(self.gate_proj(x)) * self.up_proj(x))
+        h = torch.sigmoid(self.gate_proj(x)) * self.up_proj(x)
+        h = self.down_proj(h)
+        h = self.dropout(h)
+        return h
 
 
 class QuantilePredictHead(nn.Module):
@@ -572,18 +576,18 @@ class QuantilePredictHead(nn.Module):
         Output:
             (batch_size, seq_len, patch_size * num_quantiles)
         """
-        return self.down_proj(self.up_proj(h) * torch.sigmoid(self.gate_proj(h)))
+        h = torch.sigmoid(self.gate_proj(h)) * self.up_proj(h)
+        return self.down_proj(h)
 
 
-# Copied from https://github.com/amazon-science/chronos-forecasting/blob/main/src/chronos/chronos_bolt.py
+# Modified from https://github.com/amazon-science/chronos-forecasting/blob/main/src/chronos/chronos_bolt.py
 class InstanceNorm(nn.Module):
     """
-    Apply standardization along the last dimension and optionally apply arcsinh after standardization.
+    Apply standardization along the last dimension.
     """
-    def __init__(self, eps: float = 1e-5, use_arcsinh: bool = False) -> None:
+    def __init__(self, eps: float = 1) -> None:
         super().__init__()
         self.eps = eps
-        self.use_arcsinh = use_arcsinh
 
     def forward(
         self, x: torch.Tensor, loc_scale: Optional[Tuple[torch.Tensor, torch.Tensor]] = None
@@ -597,16 +601,12 @@ class InstanceNorm(nn.Module):
         else:
             loc, scale = loc_scale
         scaled_x = (x - loc) / scale
-        if self.use_arcsinh:
-            scaled_x = torch.arcsinh(scaled_x)
         return scaled_x.to(orig_dtype), (loc, scale)
 
     def inverse(self, x: torch.Tensor, loc_scale: tuple[torch.Tensor, torch.Tensor]) -> torch.Tensor:
         orig_dtype = x.dtype
         x = x.to(torch.float32)
         loc, scale = loc_scale
-        if self.use_arcsinh:
-            x = torch.sinh(x)
         x = x * scale + loc
         return x.to(orig_dtype)
 
