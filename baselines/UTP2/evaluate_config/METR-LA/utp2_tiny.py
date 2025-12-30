@@ -32,7 +32,8 @@ UTP2_CONFIG = UTP2Config(
     num_layers=3,
     num_attention_heads=4,
     rope_theta=10000.0,
-    attention_dropout=0.0,
+    dropout=0.0,
+    use_arcsinh=True,
 )
 
 MODEL_PARAM = {

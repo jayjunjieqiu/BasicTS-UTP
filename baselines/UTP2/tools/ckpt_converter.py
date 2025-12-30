@@ -25,33 +25,63 @@ def convert_ckpt(ckpt_path: str, model_param: dict, save_path: str):
     return save_path
 
 # Example usage
-# ckpt_path = '/path/to/checkpoint.pt'
-# save_path = '/path/to/converted_checkpoint.pt'
+ckpt_path = '/data/junjieqiu/BasicTS-0.5.8/checkpoints/UTP2Pretrain/BLAST_100000/387a1cc0d30e8971b693fbf8e7f0ea95/UTP2Pretrain_100000.pt'
+save_path = '/data/junjieqiu/BasicTS-0.5.8/checkpoints/UTP2Pretrain/BLAST_100000/387a1cc0d30e8971b693fbf8e7f0ea95/factost_utp2_mini_100000.pt'
 # model_param = {
-#     "quantiles": [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9],
+#     "quantiles": [0.01, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 0.99],
 #     "patch_size": 16,
 #     "rope_percentage": 0.75,
-#     "hidden_size": 192,
-#     "intermediate_size": 768,
-#     "num_layers": 4,
-#     "num_attention_heads": 6,
-#     "max_input_patches": 32,
-#     "max_output_patches": 8,
+#     "max_input_patches": 128,
+#     "max_output_patches": 16,
+#     "hidden_size": 256,
+#     "intermediate_size": 1024,
+#     "num_layers": 3,
+#     "num_attention_heads": 4,
+#     "use_arcsinh": True,
 #     "rope_theta": 10000.0,
-#     "attention_dropout": 0.0,
-#     "use_arcsinh": True
+#     "dropout": 0.1,
+# }
+model_param = {
+    "quantiles": [0.01, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 0.99],
+    "patch_size": 16,
+    "rope_percentage": 0.75,
+    "max_input_patches": 128,
+    "max_output_patches": 16,
+    "hidden_size": 384,
+    "intermediate_size": 1536,
+    "num_layers": 4,
+    "num_attention_heads": 6,
+    "use_arcsinh": True,
+    "rope_theta": 10000.0,
+    "dropout": 0.1,
+}
+# model_param = {
+#     "quantiles": [0.01, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 0.99],
+#     "patch_size": 16,
+#     "rope_percentage": 0.75,
+#     "max_input_patches": 128,
+#     "max_output_patches": 16,
+#     "hidden_size": 512,
+#     "intermediate_size": 2048,
+#     "num_layers": 6,
+#     "num_attention_heads": 8,
+#     "use_arcsinh": True,
+#     "rope_theta": 10000.0,
+#     "dropout": 0.1,
 # }
 
-# if __name__ == "__main__":
-#     os.makedirs(os.path.dirname(save_path), exist_ok=True)
-#     converted_path = convert_ckpt(ckpt_path, model_param, save_path)
-#     print('Converted ckpt saved to:', converted_path)
-#     
-#     # Verify by loading the converted ckpt
-#     model2 = UTP2.load_model(converted_path, map_location='cpu')
-#     context = torch.randn(1, 32 * 16) # batch_size, input_length
-#     # Need context_mask for UTP2 forward/predict usually
-#     # But predict method handles list of tensors. If tensor, it expects (B, L)
-#     # predict method signature: predict(context, prediction_length)
-#     pred = model2.predict(context, prediction_length=8 * 16)
-#     print("Dummy prediction passed successfully.")
+if __name__ == "__main__":
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+    converted_path = convert_ckpt(ckpt_path, model_param, save_path)
+    print('Converted ckpt saved to:', converted_path)
+    
+    # Verify by loading the converted ckpt
+    model2 = UTP2.load_model(converted_path, map_location='cpu')
+    context = torch.randn(1, 32 * 16) # batch_size, input_length
+    total_params = sum(p.numel() for p in model2.parameters())
+    print(f"Number of parameters: {total_params:,}")
+    # Need context_mask for UTP2 forward/predict usually
+    # But predict method handles list of tensors. If tensor, it expects (B, L)
+    # predict method signature: predict(context, prediction_length)
+    pred = model2.predict(context, prediction_length=8 * 16)
+    print("Dummy prediction passed successfully.")

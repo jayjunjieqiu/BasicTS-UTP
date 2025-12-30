@@ -22,6 +22,6 @@ class InfiniteGenerator:
             # see https://pytorch.org/docs/stable/data.html
             sampler = self.dataloader.sampler
             if torch.distributed.is_initialized() and isinstance(sampler, DistributedSampler) and sampler.shuffle:
-                self.dataloader.sampler.set_epoch(random.randint(0, 1e7))
+                self.dataloader.sampler.set_epoch(random.randint(0, int(1e7)))
             self.iterator = iter(self.dataloader)
             return next(self.iterator)

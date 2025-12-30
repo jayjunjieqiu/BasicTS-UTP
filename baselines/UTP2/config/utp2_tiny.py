@@ -30,6 +30,7 @@ UTP2_CONFIG = UTP2Config(
     intermediate_size=1024,
     num_layers=3,
     num_attention_heads=4,
+    use_arcsinh=True,
     rope_theta=10000.0,
     dropout=0.1,
 )
