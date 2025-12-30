@@ -1,7 +1,7 @@
 import torch
 from torch import nn
 import torch.nn.functional as F
-from typing import Optional, Union, List, Callable
+from typing import Optional, Union, List, Callable, Tuple
 from dataclasses import dataclass, asdict
 from einops import rearrange, repeat
 from .utils import weighted_quantile, interpolate_quantiles
@@ -280,7 +280,7 @@ class UTP2(nn.Module):
     @classmethod
     def compute_loss(
         cls, predictions: torch.Tensor, targets: torch.Tensor, 
-        targets_mask: torch.Tensor, quantiles: list[float]
+        targets_mask: torch.Tensor, quantiles: List[float]
         ):
         """
         Inputs:
@@ -335,7 +335,7 @@ class RotaryEmbedding(nn.Module):
     def compute_default_rope_parameters(
         config: Optional[UTP2Config] = None,
         device: Optional["torch.device"] = None,
-    ) -> tuple["torch.Tensor", float]:
+    ) -> Tuple["torch.Tensor", float]:
         base = config.rope_theta
         dim = config.hidden_size // config.num_attention_heads
 
@@ -492,7 +492,7 @@ class TransformerEncoderLayer(nn.Module):
         self.post_attention_layernorm = nn.RMSNorm(config.hidden_size, eps=1e-6)
         self.dropout = nn.Dropout(config.dropout)
 
-    def forward(self, h: torch.Tensor, position_embedding: tuple[torch.Tensor, torch.Tensor], attention_mask: torch.Tensor):
+    def forward(self, h: torch.Tensor, position_embedding: Tuple[torch.Tensor, torch.Tensor], attention_mask: torch.Tensor):
         """
         Args:
             h: a tensor of shape (batch_size, seq_len, hidden_size)
@@ -593,8 +593,8 @@ class InstanceNorm(nn.Module):
         self.use_arcsinh = use_arcsinh
 
     def forward(
-        self, x: torch.Tensor, loc_scale: tuple[torch.Tensor, torch.Tensor] | None = None
-    ) -> tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
+        self, x: torch.Tensor, loc_scale: Optional[Tuple[torch.Tensor, torch.Tensor]] = None
+    ) -> Tuple[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         orig_dtype = x.dtype
         x = x.to(torch.float32)
         if loc_scale is None:
@@ -611,7 +611,7 @@ class InstanceNorm(nn.Module):
 
         return scaled_x.to(orig_dtype), (loc, scale)
 
-    def inverse(self, x: torch.Tensor, loc_scale: tuple[torch.Tensor, torch.Tensor]) -> torch.Tensor:
+    def inverse(self, x: torch.Tensor, loc_scale: Tuple[torch.Tensor, torch.Tensor]) -> torch.Tensor:
         orig_dtype = x.dtype
         x = x.to(torch.float32)
         loc, scale = loc_scale

@@ -1,10 +1,11 @@
 import torch
 from einops import repeat
+from typing import List, Union
 
 # Copied from https://github.com/amazon-science/chronos-forecasting/blob/main/src/chronos/chronos2/utils.py
 def interpolate_quantiles(
-    query_quantile_levels: torch.Tensor | list[float],
-    original_quantile_levels: torch.Tensor | list[float],
+    query_quantile_levels: Union[torch.Tensor, List[float]],
+    original_quantile_levels: Union[torch.Tensor, List[float]],
     original_values: torch.Tensor,
 ) -> torch.Tensor:
     """
@@ -117,8 +118,8 @@ def interpolate_quantiles(
 
 # Copied from https://github.com/amazon-science/chronos-forecasting/blob/main/src/chronos/chronos2/utils.py
 def weighted_quantile(
-    query_quantile_levels: torch.Tensor | list[float],
-    sample_weights: torch.Tensor | list[float],
+    query_quantile_levels: Union[torch.Tensor, List[float]],
+    sample_weights: Union[torch.Tensor, List[float]],
     samples: torch.Tensor,
 ):
     """
