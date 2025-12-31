@@ -17,7 +17,6 @@ class UTP2Config:
     intermediate_size: int
     num_layers: int
     num_attention_heads: int
-    use_arcsinh: bool = True
     rope_theta: float = 10000.0
     dropout: float = 0.0
 
@@ -32,7 +31,7 @@ class UTP2(nn.Module):
             TransformerEncoderLayer(config) for _ in range(config.num_layers)
         ])
         self.predict_head = QuantilePredictHead(config)
-        self.instance_norm = InstanceNorm(use_arcsinh=config.use_arcsinh)
+        self.instance_norm = InstanceNorm()
         self.patch = Patch(config.patch_size, config.patch_size)
 
     def forward(self, context: torch.Tensor, context_mask: torch.Tensor, num_output_patches: int) -> torch.Tensor:
@@ -587,10 +586,9 @@ class InstanceNorm(nn.Module):
     Apply standardization along the last dimension and optionally apply arcsinh after standardization.
     """
 
-    def __init__(self, eps: float = 1e-5, use_arcsinh: bool = False) -> None:
+    def __init__(self, eps: float = 1) -> None:
         super().__init__()
         self.eps = eps
-        self.use_arcsinh = use_arcsinh
 
     def forward(
         self, x: torch.Tensor, loc_scale: Optional[Tuple[torch.Tensor, torch.Tensor]] = None
@@ -606,18 +604,12 @@ class InstanceNorm(nn.Module):
 
         scaled_x = (x - loc) / scale
 
-        if self.use_arcsinh:
-            scaled_x = torch.arcsinh(scaled_x)
-
         return scaled_x.to(orig_dtype), (loc, scale)
 
     def inverse(self, x: torch.Tensor, loc_scale: Tuple[torch.Tensor, torch.Tensor]) -> torch.Tensor:
         orig_dtype = x.dtype
         x = x.to(torch.float32)
         loc, scale = loc_scale
-
-        if self.use_arcsinh:
-            x = torch.sinh(x)
 
         x = x * scale + loc
 

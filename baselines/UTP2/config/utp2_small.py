@@ -28,7 +28,6 @@ UTP2_CONFIG = UTP2Config(
     intermediate_size=2048,
     num_layers=6,
     num_attention_heads=8,
-    use_arcsinh=True,
     rope_theta=10000.0,
     dropout=0.1,
 )
