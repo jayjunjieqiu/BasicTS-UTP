@@ -586,7 +586,7 @@ class InstanceNorm(nn.Module):
     Apply standardization along the last dimension and optionally apply arcsinh after standardization.
     """
 
-    def __init__(self, eps: float = 1) -> None:
+    def __init__(self, eps: float = 1e-5) -> None:
         super().__init__()
         self.eps = eps
 
